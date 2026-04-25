@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tate Tracker</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand__title">Tate Tracker</div>
+        <div class="brand__subtitle">Keyboard-driven HTML5 music tracker</div>
+      </div>
+
+      <div class="controls">
+        <button id="masterStartBtn" class="btn btn--primary" type="button">Master Start</button>
+
+        <div class="control-group">
+          <input id="bpmInput" class="input input--num" type="number" min="30" max="300" step="1" value="120" placeholder="BPM" aria-label="BPM" />
+        </div>
+
+        <button id="playBtn" class="btn btn--play" type="button" aria-label="Play/Pause" title="Play/Pause (Space)">▶</button>
+
+        <div class="divider"></div>
+
+        <button id="exportBtn" class="btn" type="button">Export</button>
+        <div class="control-group control-group--wide">
+          <input id="importInput" class="input" type="text" placeholder="Import code…" aria-label="Import song code" />
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="panel panel--grow">
+        <div class="panel__title">
+          <span id="screenName">Phrase</span>
+          <span class="panel__title-sep">/</span>
+          <span id="screenId" class="mono">Phrase 00</span>
+        </div>
+        <div class="screenframe">
+          <div id="phraseView" class="screen screen--active">
+            <div id="tracker" class="tracker" aria-label="Tracker grid" role="grid"></div>
+            <div class="footer-hint">
+              <div><span class="kbd">Arrows</span> move cursor</div>
+              <div><span class="kbd">Hold Z</span> + <span class="kbd">Arrows</span> edit</div>
+              <div><span class="kbd">X</span> clear cell</div>
+              <div><span class="kbd">Space</span> play/pause</div>
+              <div><span class="kbd">Right Shift</span> + <span class="kbd">Arrows</span> switch screen</div>
+              <div>Hex everywhere except Note (e.g. <span class="mono">0A</span>)</div>
+            </div>
+          </div>
+
+          <div id="songView" class="screen" aria-label="Song view"></div>
+          <div id="chainView" class="screen" aria-label="Chain view"></div>
+          <div id="instrumentView" class="screen" aria-label="Instrument view">
+            <div class="instrument">
+              <div class="instrument__section">
+                <div class="instrument__title">PU1 / PU2</div>
+                <div class="instrument__grid2">
+                  <div class="control-group">
+                    <label class="label" for="pulse1Width">PU1 Width</label>
+                    <select id="pulse1Width" class="input input--select">
+                      <option value="12.5">12.5%</option>
+                      <option value="25">25%</option>
+                      <option value="50" selected>50%</option>
+                      <option value="75">75%</option>
+                    </select>
+                  </div>
+                  <div class="control-group">
+                    <label class="label" for="pulse2Width">PU2 Width</label>
+                    <select id="pulse2Width" class="input input--select">
+                      <option value="12.5">12.5%</option>
+                      <option value="25">25%</option>
+                      <option value="50" selected>50%</option>
+                      <option value="75">75%</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="instrument__section">
+                <div class="instrument__title">WAV / NOI</div>
+                <div class="instrument__grid2">
+                  <div class="control-group">
+                    <label class="label" for="wavType">WAV</label>
+                    <select id="wavType" class="input input--select">
+                      <option value="triangle" selected>Triangle</option>
+                      <option value="sawtooth">Saw</option>
+                      <option value="square">Square</option>
+                      <option value="sine">Sine</option>
+                    </select>
+                  </div>
+                  <div class="control-group">
+                    <label class="label" for="noiseType">NOI</label>
+                    <select id="noiseType" class="input input--select">
+                      <option value="white" selected>White</option>
+                      <option value="pink">Pink</option>
+                      <option value="brown">Metallic</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="instrument__section">
+                <div class="instrument__title">Mixer</div>
+                <div class="mixer">
+                  <div class="mixer__row">
+                    <div class="mixer__label mono">PU1</div>
+                    <input id="mixVol0" class="mixer__slider" type="range" min="0" max="100" step="1" value="90" />
+                    <div id="mixVol0Val" class="mixer__val mono">90</div>
+                  </div>
+                  <div class="mixer__row">
+                    <div class="mixer__label mono">PU2</div>
+                    <input id="mixVol1" class="mixer__slider" type="range" min="0" max="100" step="1" value="90" />
+                    <div id="mixVol1Val" class="mixer__val mono">90</div>
+                  </div>
+                  <div class="mixer__row">
+                    <div class="mixer__label mono">WAV</div>
+                    <input id="mixVol2" class="mixer__slider" type="range" min="0" max="100" step="1" value="90" />
+                    <div id="mixVol2Val" class="mixer__val mono">90</div>
+                  </div>
+                  <div class="mixer__row">
+                    <div class="mixer__label mono">NOI</div>
+                    <input id="mixVol3" class="mixer__slider" type="range" min="0" max="100" step="1" value="90" />
+                    <div id="mixVol3Val" class="mixer__val mono">90</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="placeholderView" class="screen" aria-live="polite" hidden>
+          <div class="placeholder">
+            <div id="placeholderTitle" class="placeholder__title">--</div>
+            <div class="placeholder__body">Placeholder view (screen switching only).</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <nav id="navMap" class="navmap" aria-label="Screens">
+      <button class="navmap__btn" data-screen="S" type="button" aria-label="Song">S</button>
+      <button class="navmap__btn" data-screen="C" type="button" aria-label="Chain">C</button>
+      <button class="navmap__btn" data-screen="P" type="button" aria-label="Phrase">P</button>
+      <button class="navmap__btn" data-screen="I" type="button" aria-label="Instrument">I</button>
+      <button class="navmap__btn" data-screen="T" type="button" aria-label="Table">T</button>
+    </nav>
+
+    <div class="statusbar">
+      <div id="statusLeft" class="statusbar__left">Ready.</div>
+      <div id="statusRight" class="statusbar__right mono">Row -- Col --</div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
