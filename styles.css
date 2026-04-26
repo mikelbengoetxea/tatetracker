@@ -115,9 +115,9 @@ html {
 }
 .control-group--wide {
   width: auto;
-  flex: 1 1 220px;
-  min-width: 120px;
-  max-width: 320px;
+  flex: 1 1 160px;
+  min-width: 0;
+  max-width: none;
 }
 .controls .btn { white-space: nowrap; }
 .controls .input { min-width: 0; }
@@ -223,8 +223,7 @@ html {
 }
 
 .tracker-header, .tracker-row {
-  display: grid;
-  grid-template-columns: 60px 120px 90px 90px 90px;
+  display: flex;
 }
 .tracker-header {
   background: #0a0f15;
@@ -250,6 +249,10 @@ html {
   text-overflow: ellipsis;
   display: flex;
   align-items: center;
+  justify-content: center;
+  text-align: center;
+  flex: 1 1 0;
+  min-width: 0;
 }
 .cell:last-child { border-right: none; }
 
@@ -351,20 +354,20 @@ html {
   border-radius: 10px;
   overflow: hidden;
   font-family: var(--mono);
+  touch-action: none;
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 .list16__row {
-  display: grid;
-  grid-template-columns: 70px 1fr;
+  display: flex;
   border-bottom: 1px solid rgba(24, 33, 45, 0.75);
   flex: 1 1 0;
   min-height: 0;
 }
-.list16--song .list16__row { grid-template-columns: 70px repeat(4, 1fr); }
-.list16--chain .list16__row { grid-template-columns: 70px 1fr 1fr; }
+.list16--song .list16__row { }
+.list16--chain .list16__row { }
 .list16__row--header {
   background: #0a0f15;
   flex: 0 0 auto;
@@ -384,6 +387,10 @@ html {
   text-overflow: ellipsis;
   display: flex;
   align-items: center;
+  justify-content: center;
+  text-align: center;
+  flex: 1 1 0;
+  min-width: 0;
 }
 .list16__cell:last-child { border-right: none; }
 /* Hover row highlight removed (hardware-style UI). */

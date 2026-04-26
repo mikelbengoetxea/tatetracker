@@ -54,7 +54,7 @@ function chainLabel(id) {
 
 function slotLabel(kind, id) {
   if (id == null) return "--";
-  return kind === "chain" ? chainLabel(id) : phraseLabel(id);
+  return idHex(id);
 }
 
 function safeB64EncodeUtf8(str) {
@@ -271,7 +271,9 @@ const elMasterStart = document.getElementById("masterStartBtn");
 const elPlay = document.getElementById("playBtn");
 const elBpm = document.getElementById("bpmInput");
 const elExport = document.getElementById("exportBtn");
+const elExportOutput = document.getElementById("exportOutput");
 const elImport = document.getElementById("importInput");
+const elReset = document.getElementById("resetBtn");
 const elPulse1Width = document.getElementById("pulse1Width");
 const elPulse2Width = document.getElementById("pulse2Width");
 const elPhraseView = document.getElementById("phraseView");
@@ -1513,111 +1515,149 @@ function togglePlayback() {
 
 function exportSongCode() {
   const json = JSON.stringify(state);
-  const b64 = safeB64EncodeUtf8(json);
-  navigator.clipboard?.writeText(b64).catch(() => {});
-  setStatus("Exported song code to clipboard.");
+  if (elExportOutput) elExportOutput.value = json;
+  navigator.clipboard?.writeText(json).catch(() => {});
+  setStatus("Exported project JSON to clipboard.");
 }
 
 function importSongCode(code) {
   try {
-    const json = safeB64DecodeUtf8(code.trim());
-    const parsed = JSON.parse(json);
-    const next = defaultState();
-
-    if (Number.isFinite(parsed?.bpm)) next.bpm = clamp(parsed.bpm, 30, 300);
-    if (Number.isFinite(parsed?.pulse1Width)) next.pulse1Width = parsed.pulse1Width;
-    if (Number.isFinite(parsed?.pulse2Width)) next.pulse2Width = parsed.pulse2Width;
-      if (typeof parsed?.wavType === "string") next.wavType = parsed.wavType;
-      if (typeof parsed?.noiseType === "string") next.noiseType = parsed.noiseType;
-      if (Array.isArray(parsed?.mixVol) && parsed.mixVol.length >= 4) {
-        next.mixVol = [0, 1, 2, 3].map((i) => clamp(parseInt(parsed.mixVol[i], 10) || 0, 0, 100));
-      }
-
-    if (Array.isArray(parsed?.song) && parsed.song.length) {
-      for (let i = 0; i < ROWS; i++) {
-        const v = parsed.song[i];
-        const b = byteOrNullFromLegacy(v);
-        next.song[i] = b;
-      }
-    }
-    if (parsed?.chains && typeof parsed.chains === "object") {
-      for (const [k, arr] of Object.entries(parsed.chains)) {
-        const id = parseInt(k, 10);
-        if (!Number.isFinite(id)) continue;
-        if (!Array.isArray(arr)) continue;
-        next.chains[id] = Array.from({ length: ROWS }, (_, i) => {
-          const b = byteOrNullFromLegacy(arr[i]);
-          return b;
-        });
-      }
-    }
-    if (parsed?.phrases && typeof parsed.phrases === "object") {
-      for (const [k, p] of Object.entries(parsed.phrases)) {
-        const id = parseInt(k, 10);
-        if (!Number.isFinite(id)) continue;
-        if (!p || typeof p !== "object") continue;
-        const steps = Array.isArray(p.steps) ? p.steps : null;
-        if (!steps) continue;
-        next.phrases[id] = {
-          steps: Array.from({ length: ROWS }, (_, i) => {
-            const src = steps[i] ?? {};
-            return {
-              note: normalizeNote(src.note) || "",
-              instr: normalizeInstr(byteOrNullFromLegacy(src.instr)),
-              cmd: cmdByteFromLegacy(src.cmd),
-              val: byteOrNullFromLegacy(src.val),
-            };
-          }),
-        };
-      }
-    }
-
-    if (Array.isArray(parsed?.steps)) {
-      const migrated = Array.from({ length: ROWS }, (_, i) => {
-        const src = parsed.steps[i] ?? {};
-        return {
-          note: normalizeNote(src.note) || "",
-          instr: normalizeInstr(byteOrNullFromLegacy(src.instr)),
-          cmd: cmdByteFromLegacy(src.cmd),
-          val: byteOrNullFromLegacy(src.val),
-        };
-      });
-      next.phrases[0x00] = { steps: migrated };
-      next.song = Array.from({ length: ROWS }, () => 0x00);
-      next.chains[0x00] = Array.from({ length: ROWS }, () => 0x00);
-    }
-
-    state = next;
-    saveState();
-    elBpm.value = String(state.bpm);
-    elPulse1Width.value = String(state.pulse1Width);
-    elPulse2Width.value = String(state.pulse2Width);
-      if (elWavType) elWavType.value = String(state.wavType || "triangle");
-      if (elNoiseType) elNoiseType.value = String(state.noiseType || "white");
-      if (elMixVol0) elMixVol0.value = String(clamp(state.mixVol?.[0] ?? 90, 0, 100));
-      if (elMixVol1) elMixVol1.value = String(clamp(state.mixVol?.[1] ?? 90, 0, 100));
-      if (elMixVol2) elMixVol2.value = String(clamp(state.mixVol?.[2] ?? 90, 0, 100));
-      if (elMixVol3) elMixVol3.value = String(clamp(state.mixVol?.[3] ?? 90, 0, 100));
-      if (elMixVol0Val) elMixVol0Val.textContent = elMixVol0?.value ?? "";
-      if (elMixVol1Val) elMixVol1Val.textContent = elMixVol1?.value ?? "";
-      if (elMixVol2Val) elMixVol2Val.textContent = elMixVol2?.value ?? "";
-      if (elMixVol3Val) elMixVol3Val.textContent = elMixVol3?.value ?? "";
-    if (engineReady) {
-      Tone.Transport.bpm.value = state.bpm;
-      applyPulseWidth(1, state.pulse1Width);
-      applyPulseWidth(2, state.pulse2Width);
-        applyInstrumentSettingsFromState();
-    }
-    const sr = state.song?.[songSelRow];
-    activeChainId = (Array.isArray(sr) ? sr[songSelCol] : (songSelCol === 0 ? sr : null)) ?? 0x00;
-    const ch = state.chains[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
-    state.chains[activeChainId] = ch.map((r) => normalizeChainRow(r));
-    activePhraseId = normalizeChainRow(state.chains[activeChainId][chainSelRow]).phraseId ?? 0x00;
-    setActiveScreen(activeScreen);
-    setStatus("Imported song code.");
+    const parsed = JSON.parse(String(code ?? "").trim());
+    state = coerceProjectState(parsed);
+    afterProjectLoaded("Imported project JSON.");
   } catch {
-    setStatus("Import failed. Invalid Base64 or JSON.");
+    setStatus("Import failed. Invalid JSON.");
   }
+}
+
+function coerceProjectState(parsed) {
+  const s = defaultState();
+  if (!parsed || typeof parsed !== "object") return s;
+
+  if (Number.isFinite(parsed?.bpm)) s.bpm = clamp(parsed.bpm, 30, 300);
+  if (Number.isFinite(parsed?.pulse1Width)) s.pulse1Width = parsed.pulse1Width;
+  if (Number.isFinite(parsed?.pulse2Width)) s.pulse2Width = parsed.pulse2Width;
+  if (typeof parsed?.wavType === "string") s.wavType = parsed.wavType;
+  if (typeof parsed?.noiseType === "string") s.noiseType = parsed.noiseType;
+  if (Array.isArray(parsed?.mixVol) && parsed.mixVol.length >= 4) {
+    s.mixVol = [0, 1, 2, 3].map((i) => clamp(parseInt(parsed.mixVol[i], 10) || 0, 0, 100));
+  }
+
+  // Song: always 16 rows of 4 nullable bytes
+  if (Array.isArray(parsed?.song) && parsed.song.length) {
+    for (let r = 0; r < ROWS; r++) {
+      const row = parsed.song[r];
+      if (Array.isArray(row)) {
+        s.song[r] = SONG_COLS.map((_, c) => byteOrNullFromLegacy(row[c]));
+      } else {
+        const b = byteOrNullFromLegacy(row);
+        s.song[r] = SONG_COLS.map((_, c) => (c === 0 ? b : null));
+      }
+    }
+  }
+
+  // Chains: id -> 16 rows of { phraseId, tsp }
+  if (parsed?.chains && typeof parsed.chains === "object") {
+    for (const [k, arr] of Object.entries(parsed.chains)) {
+      const id = parseInt(k, 10);
+      if (!Number.isFinite(id)) continue;
+      if (!Array.isArray(arr)) continue;
+      s.chains[id] = Array.from({ length: ROWS }, (_, i) => {
+        const src = arr[i];
+        if (src != null && typeof src === "object") return normalizeChainRow(src);
+        const phraseId = byteOrNullFromLegacy(src);
+        return { phraseId, tsp: phraseId == null ? 0x00 : 0x00 };
+      });
+    }
+  }
+
+  // Phrases: id -> { steps[16] }
+  if (parsed?.phrases && typeof parsed.phrases === "object") {
+    for (const [k, p] of Object.entries(parsed.phrases)) {
+      const id = parseInt(k, 10);
+      if (!Number.isFinite(id)) continue;
+      if (!p || typeof p !== "object") continue;
+      const steps = Array.isArray(p.steps) ? p.steps : null;
+      if (!steps) continue;
+      s.phrases[id] = {
+        steps: Array.from({ length: ROWS }, (_, i) => {
+          const src = steps[i] ?? {};
+          return {
+            note: normalizeNote(src.note) || "",
+            instr: normalizeInstr(byteOrNullFromLegacy(src.instr)),
+            cmd: cmdByteFromLegacy(src.cmd),
+            val: byteOrNullFromLegacy(src.val),
+          };
+        }),
+      };
+    }
+  }
+
+  // Legacy migration: a single `steps` pattern becomes Phrase 00, with Song -> Chain 00 -> Phrase 00.
+  if (Array.isArray(parsed?.steps)) {
+    const migrated = Array.from({ length: ROWS }, (_, i) => {
+      const src = parsed.steps[i] ?? {};
+      return {
+        note: normalizeNote(src.note) || "",
+        instr: normalizeInstr(byteOrNullFromLegacy(src.instr)),
+        cmd: cmdByteFromLegacy(src.cmd),
+        val: byteOrNullFromLegacy(src.val),
+      };
+    });
+    s.phrases[0x00] = { steps: migrated };
+    s.song = Array.from({ length: ROWS }, () => SONG_COLS.map((_, c) => (c === 0 ? 0x00 : null)));
+    s.chains[0x00] = Array.from({ length: ROWS }, () => ({ phraseId: 0x00, tsp: 0x00 }));
+  }
+
+  // Ensure at least 00 exists
+  if (!s.chains[0x00]) s.chains[0x00] = Array.from({ length: ROWS }, () => emptyChainRow());
+  if (!s.phrases[0x00]) s.phrases[0x00] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: 0x00, cmd: null, val: null })) };
+
+  return s;
+}
+
+function afterProjectLoaded(msg) {
+  saveState();
+  if (elBpm) elBpm.value = String(state.bpm);
+  if (elPulse1Width) elPulse1Width.value = String(state.pulse1Width);
+  if (elPulse2Width) elPulse2Width.value = String(state.pulse2Width);
+  if (elWavType) elWavType.value = String(state.wavType || "triangle");
+  if (elNoiseType) elNoiseType.value = String(state.noiseType || "white");
+  if (elMixVol0) elMixVol0.value = String(clamp(state.mixVol?.[0] ?? 90, 0, 100));
+  if (elMixVol1) elMixVol1.value = String(clamp(state.mixVol?.[1] ?? 90, 0, 100));
+  if (elMixVol2) elMixVol2.value = String(clamp(state.mixVol?.[2] ?? 90, 0, 100));
+  if (elMixVol3) elMixVol3.value = String(clamp(state.mixVol?.[3] ?? 90, 0, 100));
+  if (elMixVol0Val) elMixVol0Val.textContent = elMixVol0?.value ?? "";
+  if (elMixVol1Val) elMixVol1Val.textContent = elMixVol1?.value ?? "";
+  if (elMixVol2Val) elMixVol2Val.textContent = elMixVol2?.value ?? "";
+  if (elMixVol3Val) elMixVol3Val.textContent = elMixVol3?.value ?? "";
+
+  if (engineReady) {
+    Tone.Transport.bpm.value = state.bpm;
+    applyPulseWidth(1, state.pulse1Width);
+    applyPulseWidth(2, state.pulse2Width);
+    applyInstrumentSettingsFromState();
+  }
+
+  // Re-anchor active ids to a valid slot
+  const sr = state.song?.[songSelRow];
+  activeChainId = (Array.isArray(sr) ? sr[songSelCol] : (songSelCol === 0 ? sr : null)) ?? 0x00;
+  if (!state.chains[activeChainId]) state.chains[activeChainId] = Array.from({ length: ROWS }, () => emptyChainRow());
+  state.chains[activeChainId] = state.chains[activeChainId].map((r) => normalizeChainRow(r));
+  activePhraseId = normalizeChainRow(state.chains[activeChainId][chainSelRow]).phraseId ?? 0x00;
+  if (!state.phrases[activePhraseId]) {
+    state.phrases[activePhraseId] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: 0x00, cmd: null, val: null })) };
+  }
+
+  setActiveScreen(activeScreen);
+  setStatus(msg);
+}
+
+function resetProject() {
+  state = defaultState();
+  if (elExportOutput) elExportOutput.value = "";
+  if (elImport) elImport.value = "";
+  afterProjectLoaded("Reset project to default state.");
 }
 
 function initUI() {
@@ -1706,6 +1746,8 @@ function initUI() {
     importSongCode(elImport.value);
     elImport.select();
   });
+  elExportOutput?.addEventListener("focus", () => elExportOutput.select());
+  elReset?.addEventListener("click", () => resetProject());
 
   // Click selects cell (still keyboard-first, but this makes it debuggable)
   elTracker.addEventListener("click", (e) => {
@@ -1958,6 +2000,28 @@ function initUI() {
   elTracker.addEventListener("touchcancel", (e) => {
     e.preventDefault();
     if (scrub.pointerType === "touch") scrubStop();
+    holdClear();
+  }, { passive: false });
+
+  // If the finger leaves the element, iOS may not deliver end/move to the original target.
+  window.addEventListener("touchmove", (e) => {
+    if (!scrub.active || scrub.pointerType !== "touch") return;
+    e.preventDefault();
+    const t = e.touches[0];
+    if (!t) return;
+    holdMaybeCancel(t.clientX, t.clientY);
+    scrubMoveTo(t.clientX, t.clientY);
+  }, { passive: false });
+  window.addEventListener("touchend", (e) => {
+    if (scrub.pointerType !== "touch") return;
+    e.preventDefault();
+    scrubStop();
+    holdClear();
+  }, { passive: false });
+  window.addEventListener("touchcancel", (e) => {
+    if (scrub.pointerType !== "touch") return;
+    e.preventDefault();
+    scrubStop();
     holdClear();
   }, { passive: false });
 
