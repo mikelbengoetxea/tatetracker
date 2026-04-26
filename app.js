@@ -271,7 +271,6 @@ const elMasterStart = document.getElementById("masterStartBtn");
 const elPlay = document.getElementById("playBtn");
 const elBpm = document.getElementById("bpmInput");
 const elExport = document.getElementById("exportBtn");
-const elExportOutput = document.getElementById("exportOutput");
 const elImport = document.getElementById("importInput");
 const elReset = document.getElementById("resetBtn");
 const elPulse1Width = document.getElementById("pulse1Width");
@@ -1515,9 +1514,8 @@ function togglePlayback() {
 
 function exportSongCode() {
   const json = JSON.stringify(state);
-  if (elExportOutput) elExportOutput.value = json;
   navigator.clipboard?.writeText(json).catch(() => {});
-  setStatus("Exported project JSON to clipboard.");
+  setStatus("COPIED");
 }
 
 function importSongCode(code) {
@@ -1654,8 +1652,30 @@ function afterProjectLoaded(msg) {
 }
 
 function resetProject() {
+  if (!window.confirm("Clear everything?")) return;
+  stopPlayback();
+
   state = defaultState();
-  if (elExportOutput) elExportOutput.value = "";
+
+  // Reset all selection + navigation state so the UI anchors cleanly.
+  selRow = 0;
+  selCol = 1;
+  songSelRow = 0;
+  songSelCol = 0;
+  chainSelRow = 0;
+  chainSelCol = 0;
+  activeChainId = 0x00;
+  activePhraseId = 0x00;
+  activeScreen = "P";
+  playRow = -1;
+  playChainRow = -1;
+  playSongRow = -1;
+  playMode = "P";
+  isZPressed = false;
+  isXPressed = false;
+  keyState.a = false;
+  keyState.select = false;
+
   if (elImport) elImport.value = "";
   afterProjectLoaded("Reset project to default state.");
 }
@@ -1685,6 +1705,13 @@ function initUI() {
     if (!btn) return;
     const scr = btn.getAttribute("data-screen");
     if (scr) handleNavClick(scr);
+  });
+  // Explicit binding as backup (some mobile browsers can be finicky with delegation).
+  elNavMap?.querySelectorAll(".navmap__btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const scr = btn.getAttribute("data-screen");
+      if (scr) handleNavClick(scr);
+    });
   });
 
   elMasterStart.addEventListener("click", () => {
@@ -1746,7 +1773,6 @@ function initUI() {
     importSongCode(elImport.value);
     elImport.select();
   });
-  elExportOutput?.addEventListener("focus", () => elExportOutput.select());
   elReset?.addEventListener("click", () => resetProject());
 
   // Click selects cell (still keyboard-first, but this makes it debuggable)
@@ -1915,14 +1941,14 @@ function initUI() {
       if (COLS[c]?.key === "row") return;
       screen = "P";
       elToMark = phraseCell;
-    } else if (activeScreen === "S" && listCell && listCell.dataset.screen === "S") {
+    } else if (activeScreen === "S" && listCell) {
       r = Number(listCell.dataset.row);
       if (!Number.isFinite(r)) return;
       screen = "S";
       c = Number(listCell.dataset.col);
       if (!Number.isFinite(c)) return;
       elToMark = listCell;
-    } else if (activeScreen === "C" && listCell && listCell.dataset.screen === "C") {
+    } else if (activeScreen === "C" && listCell) {
       r = Number(listCell.dataset.row);
       if (!Number.isFinite(r)) return;
       screen = "C";

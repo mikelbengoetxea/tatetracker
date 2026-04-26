@@ -122,10 +122,16 @@ html {
 .controls .btn { white-space: nowrap; }
 .controls .input { min-width: 0; }
 
+.btn--wide {
+  flex: 1 1 160px;
+  min-width: 0;
+  max-width: none;
+}
+
 .label { font-size: 0.75em; }
 .input { font-size: 0.95em; padding: 6px 8px; }
 .btn { font-size: 0.95em; padding: 6px 8px; }
-.input--num { width: 64px; }
+.input--num { width: 50px; }
 .divider { display: none; }
 
 .btn--play {
@@ -155,7 +161,7 @@ html {
   font-family: var(--mono);
 }
 .input:focus { border-color: #2e7aa1; box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.12); }
-.input--num { width: 88px; }
+.input--num { width: 50px; }
 .input--select { width: 120px; }
 
 .main {
