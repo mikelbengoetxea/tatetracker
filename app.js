@@ -1712,6 +1712,11 @@ function initUI() {
       const scr = btn.getAttribute("data-screen");
       if (scr) handleNavClick(scr);
     });
+    btn.addEventListener("touchend", (e) => {
+      e.preventDefault();
+      const scr = btn.getAttribute("data-screen");
+      if (scr) handleNavClick(scr);
+    }, { passive: false });
   });
 
   elMasterStart.addEventListener("click", () => {
@@ -1799,17 +1804,43 @@ function initUI() {
     accX: 0,
     lastY: 0,
     lastX: 0,
+  startY: 0,
+  startX: 0,
+  appliedYSteps: 0,
+  appliedXSteps: 0,
     pointerType: "mouse",
     justStoppedAt: 0,
     didMove: false,
   };
 
+  let globalTouchBound = false;
+  function bindGlobalTouch() {
+    if (globalTouchBound) return;
+    globalTouchBound = true;
+    window.addEventListener("touchmove", handleGlobalTouchMove, { passive: false });
+    window.addEventListener("touchend", handleGlobalTouchEnd, { passive: false });
+    window.addEventListener("touchcancel", handleGlobalTouchEnd, { passive: false });
+  }
+  function unbindGlobalTouch() {
+    if (!globalTouchBound) return;
+    globalTouchBound = false;
+    window.removeEventListener("touchmove", handleGlobalTouchMove);
+    window.removeEventListener("touchend", handleGlobalTouchEnd);
+    window.removeEventListener("touchcancel", handleGlobalTouchEnd);
+  }
+
   function scrubStop() {
     if (!scrub.active) return;
     scrub.active = false;
     scrub.acc = 0;
+    scrub.accX = 0;
     scrub.justStoppedAt = Date.now();
     scrub.didMove = false;
+    scrub.startY = 0;
+    scrub.startX = 0;
+    scrub.appliedYSteps = 0;
+    scrub.appliedXSteps = 0;
+    if (scrub.pointerType === "touch") unbindGlobalTouch();
     const el = elTracker.querySelector(`.cell[data-row="${scrub.row}"][data-col="${scrub.col}"]`);
     if (el) el.classList.remove("cell--scrubbing");
     // Also clear from Song/Chain cells if scrubbing there.
@@ -1903,25 +1934,25 @@ function initUI() {
 
   function scrubMoveTo(clientX, clientY) {
     if (!scrub.active) return;
-    const dy = clientY - scrub.lastY;
-    const dx = clientX - scrub.lastX;
-    scrub.lastY = clientY;
-    scrub.lastX = clientX;
-    scrub.acc += dy;
-    scrub.accX += dx;
-    if (Math.abs(dx) + Math.abs(dy) > 0) scrub.didMove = true;
+    const dyFromStart = clientY - scrub.startY;
+    const dxFromStart = clientX - scrub.startX;
+    if (Math.abs(dxFromStart) + Math.abs(dyFromStart) > 0) scrub.didMove = true;
+
+    // desired steps are based on the initial touch point (prevents "ghost scrubbing")
+    const desiredYSteps = Math.trunc((-dyFromStart) / SCRUB_STEP_PX);
+    const desiredXSteps = Math.trunc((dxFromStart) / SCRUB_STEP_PX);
+    const deltaY = desiredYSteps - (scrub.appliedYSteps || 0);
+    const deltaX = desiredXSteps - (scrub.appliedXSteps || 0);
+    scrub.appliedYSteps = desiredYSteps;
+    scrub.appliedXSteps = desiredXSteps;
 
     // Up (negative dy) => increment; down => decrement.
     if (scrub.screen === "P" && COLS[scrub.col]?.key === "note") {
-      while (scrub.acc <= -SCRUB_STEP_PX) { scrub.acc += SCRUB_STEP_PX; applyNoteOctaveDelta(1); }
-      while (scrub.acc >= SCRUB_STEP_PX) { scrub.acc -= SCRUB_STEP_PX; applyNoteOctaveDelta(-1); }
-      while (scrub.accX >= SCRUB_STEP_PX) { scrub.accX -= SCRUB_STEP_PX; applyNoteSemitoneDelta(1); }
-      while (scrub.accX <= -SCRUB_STEP_PX) { scrub.accX += SCRUB_STEP_PX; applyNoteSemitoneDelta(-1); }
+      if (deltaY !== 0) applyNoteOctaveDelta(deltaY);
+      if (deltaX !== 0) applyNoteSemitoneDelta(deltaX);
       return;
     }
-
-    while (scrub.acc <= -SCRUB_STEP_PX) { scrub.acc += SCRUB_STEP_PX; scrubApply(1); }
-    while (scrub.acc >= SCRUB_STEP_PX) { scrub.acc -= SCRUB_STEP_PX; scrubApply(-1); }
+    if (deltaY !== 0) scrubApply(deltaY);
   }
 
   function scrubStartFromTarget(target, clientX, clientY, pointerType) {
@@ -1965,10 +1996,15 @@ function initUI() {
     scrub.col = clamp(c, 0, COLS.length - 1);
     scrub.acc = 0;
     scrub.accX = 0;
+    scrub.startY = clientY;
+    scrub.startX = clientX;
+    scrub.appliedYSteps = 0;
+    scrub.appliedXSteps = 0;
     scrub.lastY = clientY;
     scrub.lastX = clientX;
     scrub.pointerType = pointerType;
     scrub.didMove = false;
+    if (pointerType === "touch") bindGlobalTouch();
 
     elToMark?.classList.add("cell--scrubbing");
     if (screen === "P") {
@@ -2019,37 +2055,35 @@ function initUI() {
     scrubMoveTo(t.clientX, t.clientY);
   }, { passive: false });
   elTracker.addEventListener("touchend", (e) => {
-    e.preventDefault();
-    if (scrub.pointerType === "touch") scrubStop();
-    holdClear();
+    if (scrub.active && scrub.pointerType === "touch") {
+      e.preventDefault();
+      scrubStop();
+      holdClear();
+    }
   }, { passive: false });
   elTracker.addEventListener("touchcancel", (e) => {
-    e.preventDefault();
-    if (scrub.pointerType === "touch") scrubStop();
-    holdClear();
+    if (scrub.active && scrub.pointerType === "touch") {
+      e.preventDefault();
+      scrubStop();
+      holdClear();
+    }
   }, { passive: false });
 
-  // If the finger leaves the element, iOS may not deliver end/move to the original target.
-  window.addEventListener("touchmove", (e) => {
+  // Global touch handlers are bound only while scrubbing (prevents "freeze" due to broad preventDefault).
+  function handleGlobalTouchMove(e) {
     if (!scrub.active || scrub.pointerType !== "touch") return;
     e.preventDefault();
     const t = e.touches[0];
     if (!t) return;
     holdMaybeCancel(t.clientX, t.clientY);
     scrubMoveTo(t.clientX, t.clientY);
-  }, { passive: false });
-  window.addEventListener("touchend", (e) => {
-    if (scrub.pointerType !== "touch") return;
+  }
+  function handleGlobalTouchEnd(e) {
+    if (!scrub.active || scrub.pointerType !== "touch") return;
     e.preventDefault();
     scrubStop();
     holdClear();
-  }, { passive: false });
-  window.addEventListener("touchcancel", (e) => {
-    if (scrub.pointerType !== "touch") return;
-    e.preventDefault();
-    scrubStop();
-    holdClear();
-  }, { passive: false });
+  }
 
   // Scroll-lock + scrubbing for Song/Chain lists (mobile)
   function bindTouchScrub(el) {

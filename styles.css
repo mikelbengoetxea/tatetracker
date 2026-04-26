@@ -52,6 +52,7 @@ html {
   z-index: 5;
   height: var(--header-h);
   overflow: hidden; /* strict: never grows taller */
+  pointer-events: auto;
 }
 
 .brand {
@@ -122,10 +123,17 @@ html {
 .controls .btn { white-space: nowrap; }
 .controls .input { min-width: 0; }
 
-.btn--wide {
-  flex: 1 1 160px;
-  min-width: 0;
-  max-width: none;
+.controls > * { flex-shrink: 1; }
+.btn { width: auto; }
+.input--import { width: 6ch; }
+.btn--icon {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 
 .label { font-size: 0.75em; }
@@ -471,6 +479,7 @@ html {
   backdrop-filter: blur(10px);
   z-index: 40;
   user-select: none;
+  pointer-events: auto;
 }
 .navmap__btn {
   flex: 1 1 0;
