@@ -981,14 +981,24 @@ function applyByteDelta(field, delta) {
 function applyCmdDelta(delta) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
-  const current = normalizeCmd(step.cmd);
-  const idx = CMD_ORDER.indexOf(current);
+  const prev = normalizeCmd(step.cmd);
+  const idx = CMD_ORDER.indexOf(prev);
   const at = idx >= 0 ? idx : 0;
   const next = CMD_ORDER[(at + delta + CMD_ORDER.length) % CMD_ORDER.length];
   step.cmd = next;
   ensureValSemantics(step);
   saveState();
   renderTracker();
+  // If leaving 'O', reset channel pan to center immediately (engine/UI consistency).
+  if (engineReady && prev === "O" && next !== "O") {
+    const channel = instrToChannel(step.instr);
+    const panner =
+      channel === 0 ? panPulse1 :
+      channel === 1 ? panPulse2 :
+      channel === 2 ? panWave :
+      panNoise;
+    if (panner?.pan?.value != null) panner.pan.value = 0;
+  }
   setStatus(`Cmd @ ${rowHex(selRow)} = ${next ?? "--"}`);
 }
 
@@ -1235,10 +1245,12 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     channel === 2 ? panWave :
     panNoise;
 
-  if (cmd === "O" && panner?.pan?.setValueAtTime) {
-    panner.pan.setValueAtTime(panFromByte(valByte), time);
-  } else if (cmd === "O" && panner?.pan?.value != null) {
-    panner.pan.value = panFromByte(valByte);
+  // LSDj-style default: center pan unless 'O' explicitly sets it.
+  const nextPan = cmd === "O" ? panFromByte(valByte) : 0;
+  if (panner?.pan?.setValueAtTime) {
+    panner.pan.setValueAtTime(nextPan, time);
+  } else if (panner?.pan?.value != null) {
+    panner.pan.value = nextPan;
   }
 
   if (cmd === "W" && (channel === 0 || channel === 1)) {
@@ -1648,6 +1660,11 @@ function afterProjectLoaded(msg) {
   }
 
   setActiveScreen(activeScreen);
+  // Force all views to reflect new global state immediately.
+  renderTracker();
+  renderSongView();
+  renderChainView();
+  renderInstrumentView();
   setStatus(msg);
 }
 
@@ -1723,6 +1740,10 @@ function initUI() {
     masterStart().catch(() => setStatus("Failed to start audio context."));
   });
   elPlay.addEventListener("click", () => togglePlayback());
+  elPlay.addEventListener("touchend", (e) => {
+    e.preventDefault();
+    togglePlayback();
+  }, { passive: false });
   syncPlayButtonUI();
 
   elBpm.addEventListener("change", () => applyBpmFromUI());
@@ -1795,7 +1816,8 @@ function initUI() {
   });
 
   // Vertical scrubbing on grid cells (mouse + touch)
-  const SCRUB_STEP_PX = 10;
+  const MOUSE_SCRUB_STEP_PX = 18; // less twitchy on desktop
+  const TOUCH_SCRUB_STEP_PX = 12; // slightly more sensitive for fingers
   const scrub = {
     active: false,
     row: 0,
@@ -1939,8 +1961,9 @@ function initUI() {
     if (Math.abs(dxFromStart) + Math.abs(dyFromStart) > 0) scrub.didMove = true;
 
     // desired steps are based on the initial touch point (prevents "ghost scrubbing")
-    const desiredYSteps = Math.trunc((-dyFromStart) / SCRUB_STEP_PX);
-    const desiredXSteps = Math.trunc((dxFromStart) / SCRUB_STEP_PX);
+    const stepPx = scrub.pointerType === "mouse" ? MOUSE_SCRUB_STEP_PX : TOUCH_SCRUB_STEP_PX;
+    const desiredYSteps = Math.trunc((-dyFromStart) / stepPx);
+    const desiredXSteps = Math.trunc((dxFromStart) / stepPx);
     const deltaY = desiredYSteps - (scrub.appliedYSteps || 0);
     const deltaX = desiredXSteps - (scrub.appliedXSteps || 0);
     scrub.appliedYSteps = desiredYSteps;
@@ -1970,9 +1993,11 @@ function initUI() {
       c = Number(phraseCell.dataset.col);
       if (!Number.isFinite(r) || !Number.isFinite(c)) return;
       if (COLS[c]?.key === "row") return;
+      if (!phraseCell.classList.contains("editcell")) return;
       screen = "P";
       elToMark = phraseCell;
     } else if (activeScreen === "S" && listCell) {
+      if (!listCell.classList.contains("editcell")) return;
       r = Number(listCell.dataset.row);
       if (!Number.isFinite(r)) return;
       screen = "S";
@@ -1980,6 +2005,7 @@ function initUI() {
       if (!Number.isFinite(c)) return;
       elToMark = listCell;
     } else if (activeScreen === "C" && listCell) {
+      if (!listCell.classList.contains("editcell")) return;
       r = Number(listCell.dataset.row);
       if (!Number.isFinite(r)) return;
       screen = "C";
