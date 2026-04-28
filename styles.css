@@ -173,7 +173,7 @@ html {
 .input--select { width: 120px; }
 
 .main {
-  height: calc(100vh - var(--header-h) - var(--nav-h) - (var(--status-h) + env(safe-area-inset-bottom)));
+  height: calc(100dvh - var(--header-h) - var(--nav-h) - (var(--status-h) + env(safe-area-inset-bottom)));
   overflow: hidden;
   display: grid;
   grid-template-columns: 1fr;
