@@ -280,6 +280,7 @@ const elSongView = document.getElementById("songView");
 const elChainView = document.getElementById("chainView");
 const elInstrumentView = document.getElementById("instrumentView");
 const elPlaceholderView = document.getElementById("placeholderView");
+const elMain = document.querySelector("main.main");
 const elPlaceholderTitle = document.getElementById("placeholderTitle");
 const elNavMap = document.getElementById("navMap");
 const elScreenName = document.getElementById("screenName");
@@ -602,6 +603,9 @@ function setActiveScreen(next) {
   if (elSongView) elSongView.classList.toggle("screen--active", activeScreen === "S");
   if (elChainView) elChainView.classList.toggle("screen--active", activeScreen === "C");
   if (elInstrumentView) elInstrumentView.classList.toggle("screen--active", activeScreen === "I");
+
+  // Prevent mobile page scrolling while scrubbing in tracker-like views.
+  if (elMain) elMain.classList.toggle("main--touchlock", activeScreen === "S" || activeScreen === "C" || activeScreen === "P");
 
   // Hide placeholder entirely for now (we have real Song/Chain/Phrase)
   if (elPlaceholderView) elPlaceholderView.classList.remove("screen--active");
@@ -1821,7 +1825,9 @@ function initUI() {
 
   // Vertical scrubbing on grid cells (mouse + touch)
   const MOUSE_SCRUB_STEP_PX = 18; // less twitchy on desktop
-  const TOUCH_SCRUB_STEP_PX = 10; // spec: floor(DeltaY / 10)
+  const TOUCH_SENS_NOTE_PX = 5;
+  const TOUCH_SENS_HEX_PX = 12;
+  const TOUCH_EDGE_WRAP_PX = 140;
   const scrub = {
     active: false,
     row: 0,
@@ -1840,6 +1846,51 @@ function initUI() {
     justStoppedAt: 0,
     didMove: false,
   };
+
+  function scrubLabel() {
+    if (scrub.screen === "S") return `CHAIN`;
+    if (scrub.screen === "C") return scrub.col === 0 ? `PHRASE` : `TSP`;
+    const colKey = COLS[scrub.col]?.key;
+    if (colKey === "note") return `VALUE`;
+    if (colKey === "instr") return `INSTR`;
+    if (colKey === "cmd") return `CMD`;
+    if (colKey === "val") return `VAL`;
+    return `VALUE`;
+  }
+
+  function snapshotCurrentScrubValue() {
+    if (scrub.screen === "S") {
+      const row = state.song?.[scrub.row];
+      const cur = Array.isArray(row) ? row[scrub.col] : (scrub.col === 0 ? row : null);
+      return cur == null ? 0x00 : clampByte(cur);
+    }
+    if (scrub.screen === "C") {
+      const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+      state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
+      const entry = normalizeChainRow(state.chains[activeChainId][scrub.row]);
+      if (scrub.col === 0) return entry.phraseId == null ? 0x00 : clampByte(entry.phraseId);
+      return semisFromTspByte(entry.tsp);
+    }
+    // Phrase
+    const colKey = COLS[scrub.col]?.key;
+    const step = currentPhrase().steps[scrub.row];
+    if (colKey === "note") {
+      const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
+      return parsed.octave;
+    }
+    if (colKey === "instr") return normalizeInstr(step.instr);
+    if (colKey === "val") return step.val == null ? 0x00 : clampByte(step.val);
+    if (colKey === "cmd") {
+      const idx = CMD_ORDER.indexOf(normalizeCmd(step.cmd));
+      return idx < 0 ? 0 : idx;
+    }
+    return 0;
+  }
+
+  function touchSensitivityPx() {
+    if (scrub.screen === "P" && COLS[scrub.col]?.key === "note") return TOUCH_SENS_NOTE_PX;
+    return TOUCH_SENS_HEX_PX;
+  }
 
   let globalTouchBound = false;
   function bindGlobalTouch() {
@@ -1936,7 +1987,7 @@ function initUI() {
       saveState();
       renderSongView({ force: true });
       setStatusCursor();
-      setStatus(`Song ${SONG_COLS[songSelCol]?.key ?? "--"} @ ${rowHex(songSelRow)} = ${idHex(next)}`);
+      setStatus(`${scrubLabel()}: ${idHex(next)}`);
       return;
     }
 
@@ -1954,7 +2005,7 @@ function initUI() {
         saveState();
         renderChainView({ force: true });
         setStatusCursor();
-        setStatus(`Chain ${idHex(activeChainId)} PHR @ ${rowHex(chainSelRow)} = ${idHex(next)}`);
+        setStatus(`${scrubLabel()}: ${idHex(next)}`);
         return;
       }
       const startSemis = Number.isFinite(scrub.startValue) ? clamp((scrub.startValue | 0), -12, 12) : 0;
@@ -1964,7 +2015,7 @@ function initUI() {
       saveState();
       renderChainView({ force: true });
       setStatusCursor();
-      setStatus(`Chain ${idHex(activeChainId)} TSP @ ${rowHex(chainSelRow)} = ${formatTsp(entry.tsp)}`);
+      setStatus(`${scrubLabel()}: ${formatTsp(entry.tsp)}`);
       return;
     }
 
@@ -1982,7 +2033,7 @@ function initUI() {
       step.note = makeNote({ idx: parsed.idx, octave: nextOct });
       saveState();
       renderTracker({ force: true });
-      setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
+      setStatus(`${scrubLabel()}: ${step.note || "--"}`);
       return;
     }
 
@@ -1991,7 +2042,7 @@ function initUI() {
       step.instr = clamp(start + stepsY, 0, 3);
       saveState();
       renderTracker({ force: true });
-      setStatus(`Instr @ ${rowHex(selRow)} = ${displayInstr(step.instr)}`);
+      setStatus(`${scrubLabel()}: ${displayInstr(step.instr)}`);
       return;
     }
 
@@ -2001,7 +2052,7 @@ function initUI() {
       ensureValSemantics(step);
       saveState();
       renderTracker({ force: true });
-      setStatus(`Val @ ${rowHex(selRow)} = ${displayValForStep(step)}`);
+      setStatus(`${scrubLabel()}: ${displayValForStep(step)}`);
       return;
     }
 
@@ -2013,7 +2064,7 @@ function initUI() {
       ensureValSemantics(step);
       saveState();
       renderTracker({ force: true });
-      setStatus(`Cmd @ ${rowHex(selRow)} = ${next ?? "--"}`);
+      setStatus(`${scrubLabel()}: ${next ?? "--"}`);
       return;
     }
   }
@@ -2060,12 +2111,19 @@ function initUI() {
 
   function scrubMoveTo(clientX, clientY) {
     if (!scrub.active) return;
-    const dyFromStart = clientY - scrub.startY;
+    let dyFromStart = clientY - scrub.startY;
     const dxFromStart = clientX - scrub.startX;
     if (Math.abs(dxFromStart) + Math.abs(dyFromStart) > 0) scrub.didMove = true;
 
     // desired steps are based on the initial touch point (prevents "ghost scrubbing")
-    const stepPx = scrub.pointerType === "mouse" ? MOUSE_SCRUB_STEP_PX : TOUCH_SCRUB_STEP_PX;
+    const stepPx = scrub.pointerType === "mouse" ? MOUSE_SCRUB_STEP_PX : touchSensitivityPx();
+
+    // Screen-edge wrap: if you run out of space, re-base the start point so scrubbing can continue.
+    if (scrub.pointerType === "touch" && Math.abs(dyFromStart) > TOUCH_EDGE_WRAP_PX) {
+      // clamp dyFromStart so desiredYSteps doesn't explode, then re-base after applying.
+      dyFromStart = clamp(dyFromStart, -TOUCH_EDGE_WRAP_PX, TOUCH_EDGE_WRAP_PX);
+    }
+
     const desiredYSteps = Math.trunc((-dyFromStart) / stepPx);
     const desiredXSteps = Math.trunc((dxFromStart) / stepPx);
     const deltaY = desiredYSteps - (scrub.appliedYSteps || 0);
@@ -2073,9 +2131,16 @@ function initUI() {
     scrub.appliedYSteps = desiredYSteps;
     scrub.appliedXSteps = desiredXSteps;
 
-    // Touch: absolute, distance-based (StartValue + floor(DeltaY/10))
+    // Touch: accumulated absolute, distance-based (StartValue + floor(TotalDeltaY / sensitivity))
     if (scrub.pointerType === "touch") {
       applyTouchScrubAbsolute(desiredYSteps);
+      // If we're at the edge, rebase the origin to allow continued scrubbing.
+      const rawDy = clientY - scrub.startY;
+      if (Math.abs(rawDy) > TOUCH_EDGE_WRAP_PX) {
+        scrub.startY = clientY;
+        scrub.startValue = snapshotCurrentScrubValue();
+        scrub.appliedYSteps = 0;
+      }
       return;
     }
 
@@ -2142,34 +2207,8 @@ function initUI() {
     scrub.didMove = false;
     if (pointerType === "touch") bindGlobalTouch();
 
-    // Snapshot start value for absolute touch scrubbing.
-    scrub.startValue = null;
-    scrub.startValue2 = null;
-    if (screen === "S") {
-      const row = state.song?.[scrub.row];
-      const cur = Array.isArray(row) ? row[scrub.col] : (scrub.col === 0 ? row : null);
-      scrub.startValue = cur == null ? 0x00 : clampByte(cur);
-    } else if (screen === "C") {
-      const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
-      state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
-      const entry = normalizeChainRow(state.chains[activeChainId][scrub.row]);
-      if (scrub.col === 0) scrub.startValue = entry.phraseId == null ? 0x00 : clampByte(entry.phraseId);
-      else scrub.startValue = semisFromTspByte(entry.tsp);
-    } else if (screen === "P") {
-      const colKey = COLS[scrub.col]?.key;
-      const step = currentPhrase().steps[scrub.row];
-      if (colKey === "note") {
-        const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
-        scrub.startValue = parsed.octave;
-      } else if (colKey === "instr") {
-        scrub.startValue = normalizeInstr(step.instr);
-      } else if (colKey === "val") {
-        scrub.startValue = step.val == null ? 0x00 : clampByte(step.val);
-      } else if (colKey === "cmd") {
-        scrub.startValue = CMD_ORDER.indexOf(normalizeCmd(step.cmd));
-        if (scrub.startValue < 0) scrub.startValue = 0;
-      }
-    }
+    // Snapshot start value for accumulated absolute touch scrubbing.
+    scrub.startValue = snapshotCurrentScrubValue();
 
     elToMark?.classList.add("cell--scrubbing");
     if (screen === "P") {

@@ -181,6 +181,10 @@ html {
   padding: 12px;
 }
 
+.main--touchlock {
+  touch-action: none;
+}
+
 @media (max-width: 980px) {
   .main { padding: 10px; }
   .footer-hint { display: none; }
