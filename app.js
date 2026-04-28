@@ -441,8 +441,8 @@ function applyTransposeToNote(note, tspByte) {
   return transposeNoteBySemis(note, semis);
 }
 
-function renderTracker() {
-  if (activeScreen !== "P") return;
+function renderTracker({ force = false } = {}) {
+  if (!force && activeScreen !== "P") return;
   elTracker.innerHTML = "";
 
   const header = document.createElement("div");
@@ -496,8 +496,9 @@ function renderTracker() {
   applyPlayheadUI();
 }
 
-function renderSongView() {
-  if (activeScreen !== "S" || !elSongView) return;
+function renderSongView({ force = false } = {}) {
+  if (!elSongView) return;
+  if (!force && activeScreen !== "S") return;
   elSongView.innerHTML = "";
   const list = document.createElement("div");
   list.className = "list16 list16--song";
@@ -540,8 +541,9 @@ function renderSongView() {
   elSongView.appendChild(list);
 }
 
-function renderChainView() {
-  if (activeScreen !== "C" || !elChainView) return;
+function renderChainView({ force = false } = {}) {
+  if (!elChainView) return;
+  if (!force && activeScreen !== "C") return;
   elChainView.innerHTML = "";
   const list = document.createElement("div");
   list.className = "list16 list16--chain";
@@ -1661,9 +1663,9 @@ function afterProjectLoaded(msg) {
 
   setActiveScreen(activeScreen);
   // Force all views to reflect new global state immediately.
-  renderTracker();
-  renderSongView();
-  renderChainView();
+  renderTracker({ force: true });
+  renderSongView({ force: true });
+  renderChainView({ force: true });
   renderInstrumentView();
   setStatus(msg);
 }
@@ -1739,11 +1741,13 @@ function initUI() {
   elMasterStart.addEventListener("click", () => {
     masterStart().catch(() => setStatus("Failed to start audio context."));
   });
-  elPlay.addEventListener("click", () => togglePlayback());
+  // Mobile: use touchend + preventDefault to avoid ghost double-tap/click.
   elPlay.addEventListener("touchend", (e) => {
     e.preventDefault();
     togglePlayback();
   }, { passive: false });
+  // Desktop fallback
+  elPlay.addEventListener("click", () => togglePlayback());
   syncPlayButtonUI();
 
   elBpm.addEventListener("change", () => applyBpmFromUI());
