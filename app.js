@@ -132,6 +132,26 @@ function makeNote({ idx, octave }) {
   return `${NOTE_PITCHES[i]}${o}`;
 }
 
+function noteNumberFromParts({ idx, octave }) {
+  const i = clamp(idx | 0, 0, 11);
+  const o = clamp(octave | 0, 0, 8);
+  return o * 12 + i;
+}
+
+function partsFromNoteNumber(n) {
+  const nn = clamp((n ?? 0) | 0, 0, 8 * 12 + 11);
+  const octave = Math.floor(nn / 12);
+  const idx = nn % 12;
+  return { idx, octave };
+}
+
+function randomInt(min, max) {
+  const a = Math.ceil(Number(min) || 0);
+  const b = Math.floor(Number(max) || 0);
+  if (b <= a) return a;
+  return a + Math.floor(Math.random() * (b - a + 1));
+}
+
 function placeholderOrNote(note) {
   const n = normalizeNote(note);
   return n || "--";
@@ -294,6 +314,7 @@ const elMixVol0Val = document.getElementById("mixVol0Val");
 const elMixVol1Val = document.getElementById("mixVol1Val");
 const elMixVol2Val = document.getElementById("mixVol2Val");
 const elMixVol3Val = document.getElementById("mixVol3Val");
+const elNudgeBar = document.querySelector(".nudge-bar");
 
 // Audio
 let engineReady = false;
@@ -891,6 +912,117 @@ function clampByte(v) {
   return clamp((Number(v) || 0) | 0, 0, 255);
 }
 
+function nudgeSelectedCell({ delta, isRandom }) {
+  // Only nudge in editable grid/list screens.
+  if (activeScreen !== "P" && activeScreen !== "S" && activeScreen !== "C") return false;
+
+  // Song view: chain id byte
+  if (activeScreen === "S") {
+    const r = clamp(songSelRow, 0, ROWS - 1);
+    const c = clamp(songSelCol, 0, SONG_COLS.length - 1);
+    const row = state.song?.[r];
+    const cur = Array.isArray(row) ? row[c] : (c === 0 ? row : null);
+    const start = cur == null ? 0x00 : clampByte(cur);
+    const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
+    if (Array.isArray(row)) row[c] = next;
+    else if (c === 0) state.song[r] = next;
+    saveState();
+    renderSongView({ force: true });
+    setStatusCursor();
+    setStatus(`CHAIN: ${idHex(next)}`);
+    return true;
+  }
+
+  // Chain view: phrase id byte or tsp semis
+  if (activeScreen === "C") {
+    const r = clamp(chainSelRow, 0, ROWS - 1);
+    const c = clamp(chainSelCol, 0, 1);
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((rr) => normalizeChainRow(rr));
+    const entry = normalizeChainRow(state.chains[activeChainId][r]);
+
+    if (c === 0) {
+      const start = entry.phraseId == null ? 0x00 : clampByte(entry.phraseId);
+      const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
+      entry.phraseId = next;
+      state.chains[activeChainId][r] = entry;
+      saveState();
+      renderChainView({ force: true });
+      setStatusCursor();
+      setStatus(`PHRASE: ${idHex(next)}`);
+      return true;
+    }
+
+    const startSemis = semisFromTspByte(entry.tsp);
+    const nextSemis = isRandom ? randomInt(-12, 12) : clamp(startSemis + delta, -12, 12);
+    entry.tsp = tspByteFromSemis(nextSemis);
+    state.chains[activeChainId][r] = entry;
+    saveState();
+    renderChainView({ force: true });
+    setStatusCursor();
+    setStatus(`TSP: ${formatTsp(entry.tsp)}`);
+    return true;
+  }
+
+  // Phrase view: note/instr/cmd/val (row col 1..4)
+  const r = clamp(selRow, 0, ROWS - 1);
+  const c = clamp(selCol, 1, COLS.length - 1);
+  const colKey = COLS[c]?.key;
+  if (!colKey || colKey === "row") return false;
+  const step = currentPhrase().steps[r];
+
+  if (colKey === "note") {
+    const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
+    const startN = noteNumberFromParts(parsed);
+    const nextN = isRandom
+      ? noteNumberFromParts({ idx: randomInt(0, 11), octave: parsed.octave })
+      : startN + delta;
+    step.note = makeNote(partsFromNoteNumber(nextN));
+    saveState();
+    renderTracker({ force: true });
+    setStatus(`VALUE: ${step.note || "--"}`);
+    return true;
+  }
+
+  if (colKey === "instr") {
+    const start = normalizeInstr(step.instr);
+    const next = isRandom ? randomInt(0, 3) : clamp(start + delta, 0, 3);
+    step.instr = next;
+    saveState();
+    renderTracker({ force: true });
+    setStatus(`INSTR: ${displayInstr(next)}`);
+    return true;
+  }
+
+  if (colKey === "cmd") {
+    if (isRandom) {
+      const idx = randomInt(0, CMD_ORDER.length - 1);
+      step.cmd = CMD_ORDER[idx];
+      ensureValSemantics(step);
+      saveState();
+      renderTracker({ force: true });
+      setStatus(`CMD: ${step.cmd ?? "--"}`);
+      return true;
+    }
+    // Commands don't map cleanly to hex nibbles; treat +/-16 the same as +/-1.
+    applyCmdDelta(delta >= 0 ? 1 : -1);
+    return true;
+  }
+
+  if (colKey === "val") {
+    const start = step.val == null ? 0x00 : clampByte(step.val);
+    const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
+    step.val = next;
+    ensureValSemantics(step);
+    saveState();
+    renderTracker({ force: true });
+    setStatus(`VAL: ${displayValForStep(step)}`);
+    return true;
+  }
+
+  return false;
+}
+
 function applySongHexDelta(delta) {
   if (activeScreen !== "S") return;
   const row = state.song?.[songSelRow];
@@ -997,8 +1129,9 @@ function applyNoteSemitoneDelta(delta) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
   const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
-  const nextIdx = clamp(parsed.idx + delta, 0, 11);
-  step.note = makeNote({ idx: nextIdx, octave: parsed.octave });
+  const start = noteNumberFromParts(parsed);
+  const next = partsFromNoteNumber(start + (Number(delta) || 0));
+  step.note = makeNote(next);
   saveState();
   renderTracker();
   setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
@@ -1008,8 +1141,9 @@ function applyNoteOctaveDelta(delta) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
   const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
-  const nextOct = clamp(parsed.octave + delta, 0, 8);
-  step.note = makeNote({ idx: parsed.idx, octave: nextOct });
+  const start = noteNumberFromParts(parsed);
+  const next = partsFromNoteNumber(start + 12 * (Number(delta) || 0));
+  step.note = makeNote(next);
   saveState();
   renderTracker();
   setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
@@ -1832,6 +1966,31 @@ function initUI() {
 
   elSongView?.addEventListener("click", (e) => selectFromTarget(e.target));
   elChainView?.addEventListener("click", (e) => selectFromTarget(e.target));
+
+  // Nudge bar (pointerdown for instant response)
+  elNudgeBar?.addEventListener("pointerdown", (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    const btn = t.closest(".nudge-bar__btn");
+    if (!btn) return;
+    e.preventDefault();
+
+    const action = btn.getAttribute("data-nudge");
+    if (!action) return;
+
+    const isRandom = action === "random";
+    const isNoteSelected = activeScreen === "P" && COLS[selCol]?.key === "note";
+
+    const sign =
+      action === "inc" ? 1 :
+      action === "dec" ? -1 :
+      action === "jump_inc" ? 1 :
+      action === "jump_dec" ? -1 :
+      0;
+
+    const delta = isRandom ? 0 : sign * (isNoteSelected ? (action.startsWith("jump") ? 12 : 1) : (action.startsWith("jump") ? 16 : 1));
+    nudgeSelectedCell({ delta, isRandom });
+  });
 
   function handleKeyDown(e) {
     if (document.activeElement === elImport || document.activeElement === elBpm) return;
