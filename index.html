@@ -29,11 +29,6 @@
 
     <main class="main">
       <section class="panel panel--grow">
-        <div class="panel__title">
-          <span id="screenName">Phrase</span>
-          <span class="panel__title-sep">/</span>
-          <span id="screenId" class="mono">Phrase 00</span>
-        </div>
         <div class="screenframe">
           <div id="phraseView" class="screen screen--active">
             <div id="tracker" class="tracker" aria-label="Tracker grid" role="grid"></div>
@@ -127,6 +122,14 @@
         </div>
       </section>
     </main>
+
+    <div class="nudge-bar" aria-label="Nudge">
+      <button class="nudge-bar__btn" type="button" aria-label="Nudge up">+</button>
+      <button class="nudge-bar__btn" type="button" aria-label="Nudge down">-</button>
+      <button class="nudge-bar__btn" type="button" aria-label="Jump up">⏫</button>
+      <button class="nudge-bar__btn" type="button" aria-label="Jump down">⏬</button>
+      <button class="nudge-bar__btn" type="button" aria-label="Random">R</button>
+    </div>
 
     <nav id="navMap" class="navmap" aria-label="Screens">
       <button class="navmap__btn" data-screen="S" type="button" aria-label="Song">S</button>

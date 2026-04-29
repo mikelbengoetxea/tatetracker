@@ -346,25 +346,19 @@ function syncPlayButtonUI() {
   elPlay.textContent = isPlaying ? "⏸" : "▶";
 }
 
+function viewStatusText() {
+  if (activeScreen === "S") return "SONG";
+  if (activeScreen === "C") return `CHAIN ${idHex(activeChainId)}`;
+  if (activeScreen === "P") return `PHRASE ${idHex(activePhraseId)}`;
+  if (activeScreen === "I") return "INSTRUMENT";
+  if (activeScreen === "T") return "TABLE";
+  return "--";
+}
+
 function setStatusCursor() {
-  if (activeScreen === "P") {
-    const colLabel = COLS[selCol]?.label ?? "--";
-    elStatusRight.textContent = `Row ${rowHex(selRow)}  Col ${colLabel}`;
-    return;
-  }
-  if (activeScreen === "S") {
-    elStatusRight.textContent = `Song ${SONG_COLS[songSelCol]?.key ?? "--"} Row ${rowHex(songSelRow)}`;
-    return;
-  }
-  if (activeScreen === "C") {
-    elStatusRight.textContent = `Chain ${CHAIN_COLS[chainSelCol]?.key ?? "--"} Row ${rowHex(chainSelRow)}`;
-    return;
-  }
-  if (activeScreen === "I") {
-    elStatusRight.textContent = `Instrument`;
-    return;
-  }
-  elStatusRight.textContent = `--`;
+  // Right side is now reserved for View Status (screen + id).
+  if (!elStatusRight) return;
+  elStatusRight.textContent = viewStatusText();
 }
 
 function currentPhrase() {
@@ -612,12 +606,7 @@ function setActiveScreen(next) {
   }
 
   if (elScreenName) elScreenName.textContent = SCREEN_NAMES[activeScreen] ?? "--";
-  if (elScreenId) {
-    if (activeScreen === "S") elScreenId.textContent = "Song";
-    else if (activeScreen === "C") elScreenId.textContent = chainLabel(activeChainId);
-    else if (activeScreen === "P") elScreenId.textContent = phraseLabel(activePhraseId);
-    else elScreenId.textContent = "--";
-  }
+  if (elScreenId) elScreenId.textContent = "--";
 
   // Refresh UI
   if (activeScreen === "P") {
@@ -1668,6 +1657,7 @@ function afterProjectLoaded(msg) {
   renderChainView({ force: true });
   renderInstrumentView();
   setStatus(msg);
+  setStatusCursor();
 }
 
 function resetProject() {
