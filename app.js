@@ -358,6 +358,9 @@ let playChainRow = -1;
 let playSongRow = -1;
 let playMode = "P"; // "P" | "C" | "S"
 
+// Cell clipboard for context menu copy/paste
+let cellClipboard = null; // { type: string, value: any }
+
 function setStatus(msg) {
   elStatusLeft.textContent = msg;
 }
@@ -1123,6 +1126,158 @@ function applyCmdDelta(delta) {
     if (panner?.pan?.value != null) panner.pan.value = 0;
   }
   setStatus(`Cmd @ ${rowHex(selRow)} = ${next ?? "--"}`);
+}
+
+function immediateCenterPanForStep(step) {
+  if (!engineReady) return;
+  const channel = instrToChannel(step?.instr);
+  const panner =
+    channel === 0 ? panPulse1 :
+    channel === 1 ? panPulse2 :
+    channel === 2 ? panWave :
+    panNoise;
+  if (panner?.pan?.value != null) panner.pan.value = 0;
+}
+
+function currentCellType() {
+  if (activeScreen === "S") return `song.chainId`;
+  if (activeScreen === "C") return chainSelCol === 0 ? `chain.phraseId` : `chain.tsp`;
+  if (activeScreen === "P") {
+    const key = COLS[selCol]?.key;
+    if (key === "note") return `phrase.note`;
+    if (key === "instr") return `phrase.instr`;
+    if (key === "cmd") return `phrase.cmd`;
+    if (key === "val") return `phrase.val`;
+  }
+  return null;
+}
+
+function readCurrentCellValue() {
+  const type = currentCellType();
+  if (!type) return null;
+
+  if (type === "song.chainId") {
+    const row = state.song?.[songSelRow];
+    const cur = Array.isArray(row) ? row[songSelCol] : (songSelCol === 0 ? row : null);
+    return { type, value: cur == null ? null : clampByte(cur) };
+  }
+  if (type === "chain.phraseId") {
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
+    const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
+    return { type, value: entry.phraseId == null ? null : clampByte(entry.phraseId) };
+  }
+  if (type === "chain.tsp") {
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
+    const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
+    return { type, value: semisFromTspByte(entry.tsp) };
+  }
+  // Phrase
+  const step = currentPhrase().steps[selRow];
+  if (type === "phrase.note") return { type, value: normalizeNote(step.note) || "" };
+  if (type === "phrase.instr") return { type, value: normalizeInstr(step.instr) };
+  if (type === "phrase.cmd") return { type, value: normalizeCmd(step.cmd) };
+  if (type === "phrase.val") return { type, value: step.val == null ? null : clampByte(step.val) };
+  return null;
+}
+
+function writeCurrentCellValue({ type, value }) {
+  if (!type) return false;
+
+  if (type === "song.chainId") {
+    const row = state.song?.[songSelRow];
+    const next = value == null ? null : clampByte(value);
+    if (Array.isArray(row)) row[songSelCol] = next;
+    else if (songSelCol === 0) state.song[songSelRow] = next;
+    saveState();
+    renderSongView({ force: true });
+    setStatusCursor();
+    setStatus(`Set CHAIN = ${next == null ? "--" : idHex(next)}`);
+    return true;
+  }
+
+  if (type === "chain.phraseId") {
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
+    const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
+    entry.phraseId = value == null ? null : clampByte(value);
+    state.chains[activeChainId][chainSelRow] = entry;
+    saveState();
+    renderChainView({ force: true });
+    setStatusCursor();
+    setStatus(`Set PHR = ${entry.phraseId == null ? "--" : idHex(entry.phraseId)}`);
+    return true;
+  }
+
+  if (type === "chain.tsp") {
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
+    const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
+    const semis = clamp((Number(value) || 0) | 0, -12, 12);
+    entry.tsp = tspByteFromSemis(semis);
+    state.chains[activeChainId][chainSelRow] = entry;
+    saveState();
+    renderChainView({ force: true });
+    setStatusCursor();
+    setStatus(`Set TSP = ${formatTsp(entry.tsp)}`);
+    return true;
+  }
+
+  // Phrase
+  const step = currentPhrase().steps[selRow];
+  if (type === "phrase.note") {
+    step.note = normalizeNote(String(value ?? "")) || "";
+    saveState();
+    renderTracker({ force: true });
+    setStatus(`Set NOTE = ${step.note || "--"}`);
+    return true;
+  }
+  if (type === "phrase.instr") {
+    step.instr = normalizeInstr(value == null ? 0 : value);
+    saveState();
+    renderTracker({ force: true });
+    setStatus(`Set INSTR = ${displayInstr(step.instr)}`);
+    return true;
+  }
+  if (type === "phrase.cmd") {
+    const prev = normalizeCmd(step.cmd);
+    const next = normalizeCmd(value);
+    step.cmd = next;
+    ensureValSemantics(step);
+    saveState();
+    renderTracker({ force: true });
+    if (prev === "O" && next !== "O") immediateCenterPanForStep(step);
+    setStatus(`Set CMD = ${next ?? "--"}`);
+    return true;
+  }
+  if (type === "phrase.val") {
+    step.val = value == null ? null : clampByte(value);
+    ensureValSemantics(step);
+    saveState();
+    renderTracker({ force: true });
+    setStatus(`Set VAL = ${displayValForStep(step)}`);
+    return true;
+  }
+  return false;
+}
+
+function clearCurrentCell() {
+  clearCell();
+  setStatusCursor();
+}
+
+function getSelectedCellElement() {
+  if (activeScreen === "P") {
+    return elTracker.querySelector(`.cell[data-row="${selRow}"][data-col="${selCol}"]`);
+  }
+  if (activeScreen === "S") {
+    return elSongView?.querySelector(`.list16__cell.list16__cell--selected`);
+  }
+  if (activeScreen === "C") {
+    return elChainView?.querySelector(`.list16__cell.list16__cell--selected`);
+  }
+  return null;
 }
 
 function applyNoteSemitoneDelta(delta) {
@@ -1929,43 +2084,155 @@ function initUI() {
   });
   elReset?.addEventListener("click", () => resetProject());
 
-  // Click selects cell (still keyboard-first, but this makes it debuggable)
-  elTracker.addEventListener("click", (e) => {
+  // Context menu (Copy/Paste/Delete) for already-selected cell
+  let menuEl = null;
+  let menuOpen = false;
+
+  function closeCellMenu() {
+    if (!menuEl) return;
+    menuEl.remove();
+    menuEl = null;
+    menuOpen = false;
+  }
+
+  function openCellMenuAt(clientX, clientY) {
+    closeCellMenu();
+    const current = readCurrentCellValue();
+    if (!current?.type) return;
+    const canPaste = cellClipboard?.type != null && cellClipboard.type === current.type;
+
+    menuEl = document.createElement("div");
+    menuEl.className = "cell-menu";
+    menuEl.innerHTML = `
+      <div class="cell-menu__list">
+        <button class="cell-menu__btn" data-action="copy" type="button">Copy</button>
+        <button class="cell-menu__btn" data-action="paste" type="button" ${canPaste ? "" : "disabled"}>Paste</button>
+        <button class="cell-menu__btn" data-action="delete" type="button">Delete</button>
+      </div>
+    `;
+    document.body.appendChild(menuEl);
+
+    // Position then clamp so it never goes offscreen.
+    const margin = 8;
+    const rect = menuEl.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const left = clamp(clientX - rect.width / 2, margin, vw - rect.width - margin);
+    const top = clamp(clientY - rect.height / 2, margin, vh - rect.height - margin);
+    menuEl.style.left = `${left}px`;
+    menuEl.style.top = `${top}px`;
+
+    menuEl.addEventListener("click", (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLElement)) return;
+      const btn = t.closest(".cell-menu__btn");
+      if (!btn) return;
+      const action = btn.getAttribute("data-action");
+      if (!action) return;
+
+      if (action === "copy") {
+        cellClipboard = readCurrentCellValue();
+        setStatus(`Copied ${cellClipboard?.type ?? "--"}.`);
+        closeCellMenu();
+        return;
+      }
+      if (action === "paste") {
+        if (cellClipboard?.type && current?.type && cellClipboard.type === current.type) {
+          writeCurrentCellValue(cellClipboard);
+        }
+        closeCellMenu();
+        return;
+      }
+      if (action === "delete") {
+        clearCurrentCell();
+        closeCellMenu();
+      }
+    });
+
+    menuOpen = true;
+  }
+
+  // Click-away-to-close
+  window.addEventListener("pointerdown", (e) => {
+    if (!menuOpen || !menuEl) return;
+    const t = e.target;
+    if (!(t instanceof Node)) return;
+    if (menuEl.contains(t)) return;
+    closeCellMenu();
+  }, { capture: true });
+
+  // Phrase cell: tap selects; tap again opens menu.
+  elTracker.addEventListener("pointerdown", (e) => {
+    if (activeScreen !== "P") return;
     const target = e.target;
     if (!(target instanceof HTMLElement)) return;
-    const r = Number(target.dataset.row);
-    const c = Number(target.dataset.col);
+    const cell = target.classList.contains("cell") ? target : target.closest(".cell");
+    if (!cell) return;
+    const r = Number(cell.dataset.row);
+    const c = Number(cell.dataset.col);
     if (!Number.isFinite(r) || !Number.isFinite(c)) return;
-    if (c === 0) return; // don't allow selecting Row index column
+    if (c === 0) return; // Row index column
+    e.preventDefault();
+
+    const already = (r === selRow && c === selCol);
     selRow = clamp(r, 0, ROWS - 1);
     selCol = clamp(c, 0, COLS.length - 1);
     applySelectionUI();
     focusMain();
+
+    if (already) {
+      const anchor = getSelectedCellElement()?.getBoundingClientRect();
+      const x = Number.isFinite(e.clientX) && e.clientX ? e.clientX : (anchor ? anchor.left + anchor.width / 2 : window.innerWidth / 2);
+      const y = Number.isFinite(e.clientY) && e.clientY ? e.clientY : (anchor ? anchor.top + anchor.height / 2 : window.innerHeight / 2);
+      openCellMenuAt(x, y);
+    } else {
+      closeCellMenu();
+    }
   });
-  // Simple selection for Song/Chain cells (no scrubbing).
-  function selectFromTarget(target) {
+
+  function pointerDownSelectList(e, expectedScreen) {
+    if (activeScreen !== expectedScreen) return;
+    const target = e.target;
     if (!(target instanceof HTMLElement)) return;
     const listCell = target.classList.contains("list16__cell") ? target : target.closest(".list16__cell");
     if (!listCell) return;
     const screen = listCell.dataset.screen;
+    if (screen !== expectedScreen) return;
     const r = Number(listCell.dataset.row);
     const c = Number(listCell.dataset.col);
     if (!Number.isFinite(r) || !Number.isFinite(c)) return;
-    if (screen === "S") {
+    e.preventDefault();
+
+    if (expectedScreen === "S") {
+      const already = (r === songSelRow && c === songSelCol);
       songSelRow = clamp(r, 0, ROWS - 1);
       songSelCol = clamp(c, 0, SONG_COLS.length - 1);
-      renderSongView();
+      renderSongView({ force: true });
       setStatusCursor();
-    } else if (screen === "C") {
-      chainSelRow = clamp(r, 0, ROWS - 1);
-      chainSelCol = clamp(c, 0, 1);
-      renderChainView();
-      setStatusCursor();
+      if (already) {
+        const anchor = getSelectedCellElement()?.getBoundingClientRect();
+        const x = Number.isFinite(e.clientX) && e.clientX ? e.clientX : (anchor ? anchor.left + anchor.width / 2 : window.innerWidth / 2);
+        const y = Number.isFinite(e.clientY) && e.clientY ? e.clientY : (anchor ? anchor.top + anchor.height / 2 : window.innerHeight / 2);
+        openCellMenuAt(x, y);
+      } else closeCellMenu();
+      return;
     }
+
+    const already = (r === chainSelRow && c === chainSelCol);
+    chainSelRow = clamp(r, 0, ROWS - 1);
+    chainSelCol = clamp(c, 0, 1);
+    renderChainView({ force: true });
+    setStatusCursor();
+    if (already) {
+      const anchor = getSelectedCellElement()?.getBoundingClientRect();
+      const x = Number.isFinite(e.clientX) && e.clientX ? e.clientX : (anchor ? anchor.left + anchor.width / 2 : window.innerWidth / 2);
+      const y = Number.isFinite(e.clientY) && e.clientY ? e.clientY : (anchor ? anchor.top + anchor.height / 2 : window.innerHeight / 2);
+      openCellMenuAt(x, y);
+    } else closeCellMenu();
   }
 
-  elSongView?.addEventListener("click", (e) => selectFromTarget(e.target));
-  elChainView?.addEventListener("click", (e) => selectFromTarget(e.target));
+  elSongView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "S"));
+  elChainView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "C"));
 
   // Nudge bar (pointerdown for instant response)
   elNudgeBar?.addEventListener("pointerdown", (e) => {
