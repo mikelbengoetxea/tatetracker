@@ -131,6 +131,14 @@
       <button class="nudge-bar__btn" type="button" data-nudge="random" aria-label="Random">R</button>
     </div>
 
+    <!-- Ghost select for native context menu (mobile picker / desktop dropdown) -->
+    <select id="cellMenuSelect" class="ghost-select" aria-label="Cell menu">
+      <option value="" selected disabled>Cell…</option>
+      <option value="copy">Copy</option>
+      <option value="paste">Paste</option>
+      <option value="delete">Delete</option>
+    </select>
+
     <nav id="navMap" class="navmap" aria-label="Screens">
       <button class="navmap__btn" data-screen="S" type="button" aria-label="Song">S</button>
       <button class="navmap__btn" data-screen="C" type="button" aria-label="Chain">C</button>

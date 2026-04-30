@@ -315,6 +315,7 @@ const elMixVol1Val = document.getElementById("mixVol1Val");
 const elMixVol2Val = document.getElementById("mixVol2Val");
 const elMixVol3Val = document.getElementById("mixVol3Val");
 const elNudgeBar = document.querySelector(".nudge-bar");
+const elCellMenuSelect = document.getElementById("cellMenuSelect");
 
 // Audio
 let engineReady = false;
@@ -2084,82 +2085,40 @@ function initUI() {
   });
   elReset?.addEventListener("click", () => resetProject());
 
-  // Context menu (Copy/Paste/Delete) for already-selected cell
-  let menuEl = null;
-  let menuOpen = false;
-
-  function closeCellMenu() {
-    if (!menuEl) return;
-    menuEl.remove();
-    menuEl = null;
-    menuOpen = false;
+  function openNativeCellMenu() {
+    if (!elCellMenuSelect) return;
+    // Ensure the select is reset to the neutral header option.
+    elCellMenuSelect.selectedIndex = 0;
+    elCellMenuSelect.focus({ preventScroll: true });
+    // Must be within a user gesture to open on mobile.
+    elCellMenuSelect.click();
   }
 
-  function openCellMenuAt(clientX, clientY) {
-    closeCellMenu();
+  elCellMenuSelect?.addEventListener("change", () => {
+    const action = elCellMenuSelect.value;
+    // Reset immediately for next use.
+    elCellMenuSelect.selectedIndex = 0;
+
     const current = readCurrentCellValue();
     if (!current?.type) return;
-    const canPaste = cellClipboard?.type != null && cellClipboard.type === current.type;
 
-    menuEl = document.createElement("div");
-    menuEl.className = "cell-menu";
-    menuEl.innerHTML = `
-      <div class="cell-menu__list">
-        <button class="cell-menu__btn" data-action="copy" type="button">Copy</button>
-        <button class="cell-menu__btn" data-action="paste" type="button" ${canPaste ? "" : "disabled"}>Paste</button>
-        <button class="cell-menu__btn" data-action="delete" type="button">Delete</button>
-      </div>
-    `;
-    document.body.appendChild(menuEl);
-
-    // Position then clamp so it never goes offscreen.
-    const margin = 8;
-    const rect = menuEl.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const left = clamp(clientX - rect.width / 2, margin, vw - rect.width - margin);
-    const top = clamp(clientY - rect.height / 2, margin, vh - rect.height - margin);
-    menuEl.style.left = `${left}px`;
-    menuEl.style.top = `${top}px`;
-
-    menuEl.addEventListener("click", (e) => {
-      const t = e.target;
-      if (!(t instanceof HTMLElement)) return;
-      const btn = t.closest(".cell-menu__btn");
-      if (!btn) return;
-      const action = btn.getAttribute("data-action");
-      if (!action) return;
-
-      if (action === "copy") {
-        cellClipboard = readCurrentCellValue();
-        setStatus(`Copied ${cellClipboard?.type ?? "--"}.`);
-        closeCellMenu();
-        return;
+    if (action === "copy") {
+      cellClipboard = current;
+      setStatus(`Copied ${cellClipboard?.type ?? "--"}.`);
+      return;
+    }
+    if (action === "paste") {
+      if (cellClipboard?.type && cellClipboard.type === current.type) {
+        writeCurrentCellValue(cellClipboard);
+      } else {
+        setStatus("Paste blocked (type mismatch).");
       }
-      if (action === "paste") {
-        if (cellClipboard?.type && current?.type && cellClipboard.type === current.type) {
-          writeCurrentCellValue(cellClipboard);
-        }
-        closeCellMenu();
-        return;
-      }
-      if (action === "delete") {
-        clearCurrentCell();
-        closeCellMenu();
-      }
-    });
-
-    menuOpen = true;
-  }
-
-  // Click-away-to-close
-  window.addEventListener("pointerdown", (e) => {
-    if (!menuOpen || !menuEl) return;
-    const t = e.target;
-    if (!(t instanceof Node)) return;
-    if (menuEl.contains(t)) return;
-    closeCellMenu();
-  }, { capture: true });
+      return;
+    }
+    if (action === "delete") {
+      clearCurrentCell();
+    }
+  });
 
   // Phrase cell: tap selects; tap again opens menu.
   elTracker.addEventListener("pointerdown", (e) => {
@@ -2181,12 +2140,7 @@ function initUI() {
     focusMain();
 
     if (already) {
-      const anchor = getSelectedCellElement()?.getBoundingClientRect();
-      const x = Number.isFinite(e.clientX) && e.clientX ? e.clientX : (anchor ? anchor.left + anchor.width / 2 : window.innerWidth / 2);
-      const y = Number.isFinite(e.clientY) && e.clientY ? e.clientY : (anchor ? anchor.top + anchor.height / 2 : window.innerHeight / 2);
-      openCellMenuAt(x, y);
-    } else {
-      closeCellMenu();
+      openNativeCellMenu();
     }
   });
 
@@ -2210,11 +2164,8 @@ function initUI() {
       renderSongView({ force: true });
       setStatusCursor();
       if (already) {
-        const anchor = getSelectedCellElement()?.getBoundingClientRect();
-        const x = Number.isFinite(e.clientX) && e.clientX ? e.clientX : (anchor ? anchor.left + anchor.width / 2 : window.innerWidth / 2);
-        const y = Number.isFinite(e.clientY) && e.clientY ? e.clientY : (anchor ? anchor.top + anchor.height / 2 : window.innerHeight / 2);
-        openCellMenuAt(x, y);
-      } else closeCellMenu();
+        openNativeCellMenu();
+      }
       return;
     }
 
@@ -2224,11 +2175,8 @@ function initUI() {
     renderChainView({ force: true });
     setStatusCursor();
     if (already) {
-      const anchor = getSelectedCellElement()?.getBoundingClientRect();
-      const x = Number.isFinite(e.clientX) && e.clientX ? e.clientX : (anchor ? anchor.left + anchor.width / 2 : window.innerWidth / 2);
-      const y = Number.isFinite(e.clientY) && e.clientY ? e.clientY : (anchor ? anchor.top + anchor.height / 2 : window.innerHeight / 2);
-      openCellMenuAt(x, y);
-    } else closeCellMenu();
+      openNativeCellMenu();
+    }
   }
 
   elSongView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "S"));

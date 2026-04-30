@@ -488,38 +488,15 @@ html {
   justify-content: center;
 }
 .nudge-bar__btn:active { transform: translateY(1px); }
-.cell-menu {
+
+.ghost-select {
   position: fixed;
-  z-index: 200;
-  min-width: 140px;
-  max-width: 220px;
-  padding: 8px;
-  border: 1px solid var(--grid);
-  border-radius: 12px;
-  background: #0a0f15;
-  backdrop-filter: blur(10px);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
-  font-family: var(--mono);
-}
-.cell-menu__list {
-  display: grid;
-  gap: 8px;
-}
-.cell-menu__btn {
-  width: 100%;
-  border: 1px solid var(--grid);
-  background: #0a0f15;
-  color: var(--text);
-  font-family: var(--mono);
-  padding: 10px 10px;
-  border-radius: 10px;
-  cursor: pointer;
-  text-align: left;
-}
-.cell-menu__btn:active { transform: translateY(1px); }
-.cell-menu__btn[disabled] {
-  opacity: 0.55;
-  cursor: default;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  z-index: -1;
 }
 .navmap__btn {
   flex: 1 1 0;
