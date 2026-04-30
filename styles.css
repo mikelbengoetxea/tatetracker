@@ -256,6 +256,7 @@ html {
 }
 
 .cell {
+  position: relative;
   padding: 6px 10px;
   border-right: 1px solid var(--grid);
   white-space: nowrap;
@@ -288,6 +289,22 @@ html {
   outline: 2px solid rgba(103, 232, 249, 0.55);
   outline-offset: -2px;
   background: rgba(26, 43, 61, 0.55);
+}
+
+.cell--selected.editcell {
+  padding-right: 22px;
+}
+.cell--selected.editcell::after {
+  content: "▾";
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.38;
+  color: rgba(199, 251, 255, 0.85);
+  pointer-events: none;
 }
 
 .cell--flash {
@@ -385,6 +402,7 @@ html {
 }
 .list16__row:last-child { border-bottom: none; }
 .list16__cell {
+  position: relative;
   padding: 6px 10px;
   border-right: 1px solid var(--grid);
   white-space: nowrap;
@@ -403,6 +421,21 @@ html {
   outline: 2px solid rgba(103, 232, 249, 0.55);
   outline-offset: -2px;
   background: rgba(26, 43, 61, 0.55);
+}
+.list16__cell--selected.editcell {
+  padding-right: 22px;
+}
+.list16__cell--selected.editcell::after {
+  content: "▾";
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.38;
+  color: rgba(199, 251, 255, 0.85);
+  pointer-events: none;
 }
 .list16__row--playhead {
   /* Hollow/overlay row highlight (cursor stays visible) */
@@ -464,7 +497,6 @@ html {
   justify-content: center;
   background: #222;
   border-top: 1px solid var(--grid);
-  border: 1px solid red;
   backdrop-filter: blur(10px);
   z-index: 10;
   user-select: none;
@@ -490,15 +522,21 @@ html {
 .nudge-bar__btn:active { transform: translateY(1px); }
 
 .ghost-select {
-  position: absolute;
+  position: fixed;
   left: -100px;
   top: -100px;
-  width: 40px;
-  height: 40px;
-  opacity: 0.5; /* DEBUG */
-  background: red; /* DEBUG */
-  z-index: 999;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  background: transparent;
+  color: transparent;
+  z-index: 80;
   pointer-events: auto;
+  appearance: none;
+  -webkit-appearance: none;
 }
 .navmap__btn {
   flex: 1 1 0;

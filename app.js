@@ -361,6 +361,40 @@ let playMode = "P"; // "P" | "C" | "S"
 
 // Cell clipboard for context menu copy/paste
 let cellClipboard = null; // { type: string, value: any }
+let isOpeningCellMenuSelect = false;
+
+function resetGhostSelect() {
+  if (!elCellMenuSelect) return;
+  elCellMenuSelect.style.left = "-100px";
+  elCellMenuSelect.style.top = "-100px";
+  elCellMenuSelect.style.width = "1px";
+  elCellMenuSelect.style.height = "1px";
+}
+
+/** Park invisible native <select> over the selected edit cell for the active screen. */
+function syncGhostSelectToSelection() {
+  if (!elCellMenuSelect) return;
+
+  let el = null;
+  if (activeScreen === "P") {
+    el = elTracker?.querySelector(".cell.cell--selected.editcell");
+  } else if (activeScreen === "S") {
+    el = elSongView?.querySelector(".list16__cell.list16__cell--selected.editcell");
+  } else if (activeScreen === "C") {
+    el = elChainView?.querySelector(".list16__cell.list16__cell--selected.editcell");
+  }
+
+  if (!(el instanceof HTMLElement)) {
+    resetGhostSelect();
+    return;
+  }
+
+  const r = el.getBoundingClientRect();
+  elCellMenuSelect.style.left = `${r.left}px`;
+  elCellMenuSelect.style.top = `${r.top}px`;
+  elCellMenuSelect.style.width = `${r.width}px`;
+  elCellMenuSelect.style.height = `${r.height}px`;
+}
 
 function setStatus(msg) {
   elStatusLeft.textContent = msg;
@@ -558,6 +592,7 @@ function renderSongView({ force = false } = {}) {
     list.appendChild(row);
   }
   elSongView.appendChild(list);
+  if (activeScreen === "S") syncGhostSelectToSelection();
 }
 
 function renderChainView({ force = false } = {}) {
@@ -611,11 +646,13 @@ function renderChainView({ force = false } = {}) {
     list.appendChild(row);
   }
   elChainView.appendChild(list);
+  if (activeScreen === "C") syncGhostSelectToSelection();
 }
 
 function setActiveScreen(next) {
   if (!next || !SCREEN_NAMES[next] || next === activeScreen) return;
   activeScreen = next;
+  resetGhostSelect();
 
   if (elPhraseView) elPhraseView.classList.toggle("screen--active", activeScreen === "P");
   if (elSongView) elSongView.classList.toggle("screen--active", activeScreen === "S");
@@ -645,6 +682,9 @@ function setActiveScreen(next) {
   } else {
     setStatus(`${SCREEN_NAMES[activeScreen]} screen (placeholder).`);
     setStatusCursor();
+  }
+  if (activeScreen === "P" || activeScreen === "S" || activeScreen === "C") {
+    syncGhostSelectToSelection();
   }
   renderNavMap();
 }
@@ -807,6 +847,7 @@ function applySelectionUI() {
   const sel = elTracker.querySelector(`.cell[data-row="${selRow}"][data-col="${selCol}"]`);
   if (sel) sel.classList.add("cell--selected");
   setStatusCursor();
+  syncGhostSelectToSelection();
 }
 
 function applyPlayheadUI() {
@@ -2085,29 +2126,6 @@ function initUI() {
   });
   elReset?.addEventListener("click", () => resetProject());
 
-  function resetGhostSelect() {
-    if (!elCellMenuSelect) return;
-    elCellMenuSelect.style.left = `-100px`;
-    elCellMenuSelect.style.top = `-100px`;
-  }
-
-  function openNativeCellMenuAt(clientX, clientY) {
-    if (!elCellMenuSelect) return;
-    // Ensure the select is reset to the neutral header option.
-    elCellMenuSelect.selectedIndex = 0;
-    // Move it under the user's finger (overlay strategy).
-    const size = 40;
-    const x = clamp((clientX ?? 0) - size / 2, 0, window.innerWidth - size);
-    const y = clamp((clientY ?? 0) - size / 2, 0, window.innerHeight - size);
-    elCellMenuSelect.style.left = `${x}px`;
-    elCellMenuSelect.style.top = `${y}px`;
-    elCellMenuSelect.style.width = `${size}px`;
-    elCellMenuSelect.style.height = `${size}px`;
-    elCellMenuSelect.focus({ preventScroll: true });
-    // Must be within a user gesture to open on mobile.
-    elCellMenuSelect.click();
-  }
-
   elCellMenuSelect?.addEventListener("change", () => {
     const action = elCellMenuSelect.value;
     // Reset immediately for next use.
@@ -2135,15 +2153,57 @@ function initUI() {
     }
   });
 
-  // Click-away: if user taps elsewhere without choosing, move select back offscreen.
+  // Opening the native picker from a fully invisible <select> is inconsistent on mobile; nudge it open on direct taps.
+  elCellMenuSelect?.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (isOpeningCellMenuSelect) return;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.preventDefault();
+      isOpeningCellMenuSelect = true;
+      try {
+        elCellMenuSelect.selectedIndex = 0;
+        elCellMenuSelect.focus({ preventScroll: true });
+        if (typeof elCellMenuSelect.showPicker === "function") {
+          try {
+            elCellMenuSelect.showPicker();
+            return;
+          } catch {
+            /* fall through */
+          }
+        }
+        elCellMenuSelect.click();
+      } finally {
+        window.setTimeout(() => {
+          isOpeningCellMenuSelect = false;
+        }, 0);
+      }
+    },
+    { passive: false },
+  );
+
+  function isGhostableEditCellEl(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    if (el.classList.contains("cell") && el.classList.contains("editcell")) return true;
+    if (el.classList.contains("list16__cell") && el.classList.contains("editcell")) return true;
+    return false;
+  }
+
+  // Click-away: taps outside grid/list edit cells park the ghost select off-screen.
   window.addEventListener("pointerdown", (e) => {
     const t = e.target;
     if (!(t instanceof Node)) return;
     if (elCellMenuSelect && elCellMenuSelect.contains(t)) return;
+    const el = t instanceof HTMLElement ? t : null;
+    if (el && isGhostableEditCellEl(el)) return;
+    if (el && typeof el.closest === "function") {
+      const hit = el.closest(".cell.editcell, .list16__cell.editcell");
+      if (hit) return;
+    }
     resetGhostSelect();
   }, { capture: true });
 
-  // Phrase cell: tap selects; tap again opens menu.
+  // Phrase cell: first tap selects and parks ghost <select> over the cell; second tap hits the select.
   elTracker.addEventListener("pointerdown", (e) => {
     if (activeScreen !== "P") return;
     const target = e.target;
@@ -2156,13 +2216,10 @@ function initUI() {
     if (c === 0) return; // Row index column
     e.preventDefault();
 
-    const already = (r === selRow && c === selCol);
     selRow = clamp(r, 0, ROWS - 1);
     selCol = clamp(c, 0, COLS.length - 1);
     applySelectionUI();
     focusMain();
-
-    if (already) openNativeCellMenuAt(e.clientX, e.clientY);
   });
 
   function pointerDownSelectList(e, expectedScreen) {
@@ -2179,25 +2236,17 @@ function initUI() {
     e.preventDefault();
 
     if (expectedScreen === "S") {
-      const already = (r === songSelRow && c === songSelCol);
       songSelRow = clamp(r, 0, ROWS - 1);
       songSelCol = clamp(c, 0, SONG_COLS.length - 1);
       renderSongView({ force: true });
       setStatusCursor();
-      if (already) {
-        openNativeCellMenuAt(e.clientX, e.clientY);
-      }
       return;
     }
 
-    const already = (r === chainSelRow && c === chainSelCol);
     chainSelRow = clamp(r, 0, ROWS - 1);
     chainSelCol = clamp(c, 0, 1);
     renderChainView({ force: true });
     setStatusCursor();
-    if (already) {
-      openNativeCellMenuAt(e.clientX, e.clientY);
-    }
   }
 
   elSongView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "S"));
@@ -2255,9 +2304,7 @@ function initUI() {
       e.preventDefault();
       isXPressed = true;
       if (isZPressed) {
-        if (activeScreen === "P") resetAt("P", selRow, selCol);
-        else if (activeScreen === "S") resetAt("S", songSelRow, songSelCol);
-        else if (activeScreen === "C") resetAt("C", chainSelRow, chainSelCol);
+        clearCurrentCell();
         return;
       }
       clearCell();
@@ -2330,9 +2377,22 @@ function initUI() {
 
   window.addEventListener("keydown", handleKeyDown);
   window.addEventListener("keyup", handleKeyUp);
+
+  let ghostSyncRaf = 0;
+  const scheduleGhostSync = () => {
+    if (ghostSyncRaf) return;
+    ghostSyncRaf = window.requestAnimationFrame(() => {
+      ghostSyncRaf = 0;
+      syncGhostSelectToSelection();
+    });
+  };
+  window.addEventListener("resize", scheduleGhostSync, { passive: true });
+  window.visualViewport?.addEventListener("resize", scheduleGhostSync, { passive: true });
+  window.visualViewport?.addEventListener("scroll", scheduleGhostSync, { passive: true });
 }
 
 renderTracker();
 initUI();
+syncGhostSelectToSelection();
 setStatusCursor();
 focusMain();
