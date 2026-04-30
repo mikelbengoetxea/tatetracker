@@ -490,13 +490,15 @@ html {
 .nudge-bar__btn:active { transform: translateY(1px); }
 
 .ghost-select {
-  position: fixed;
-  left: 0;
-  top: 0;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  z-index: -1;
+  position: absolute;
+  left: -100px;
+  top: -100px;
+  width: 40px;
+  height: 40px;
+  opacity: 0.5; /* DEBUG */
+  background: red; /* DEBUG */
+  z-index: 999;
+  pointer-events: auto;
 }
 .navmap__btn {
   flex: 1 1 0;

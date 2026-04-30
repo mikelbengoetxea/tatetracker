@@ -2085,10 +2085,24 @@ function initUI() {
   });
   elReset?.addEventListener("click", () => resetProject());
 
-  function openNativeCellMenu() {
+  function resetGhostSelect() {
+    if (!elCellMenuSelect) return;
+    elCellMenuSelect.style.left = `-100px`;
+    elCellMenuSelect.style.top = `-100px`;
+  }
+
+  function openNativeCellMenuAt(clientX, clientY) {
     if (!elCellMenuSelect) return;
     // Ensure the select is reset to the neutral header option.
     elCellMenuSelect.selectedIndex = 0;
+    // Move it under the user's finger (overlay strategy).
+    const size = 40;
+    const x = clamp((clientX ?? 0) - size / 2, 0, window.innerWidth - size);
+    const y = clamp((clientY ?? 0) - size / 2, 0, window.innerHeight - size);
+    elCellMenuSelect.style.left = `${x}px`;
+    elCellMenuSelect.style.top = `${y}px`;
+    elCellMenuSelect.style.width = `${size}px`;
+    elCellMenuSelect.style.height = `${size}px`;
     elCellMenuSelect.focus({ preventScroll: true });
     // Must be within a user gesture to open on mobile.
     elCellMenuSelect.click();
@@ -2098,6 +2112,7 @@ function initUI() {
     const action = elCellMenuSelect.value;
     // Reset immediately for next use.
     elCellMenuSelect.selectedIndex = 0;
+    resetGhostSelect();
 
     const current = readCurrentCellValue();
     if (!current?.type) return;
@@ -2120,6 +2135,14 @@ function initUI() {
     }
   });
 
+  // Click-away: if user taps elsewhere without choosing, move select back offscreen.
+  window.addEventListener("pointerdown", (e) => {
+    const t = e.target;
+    if (!(t instanceof Node)) return;
+    if (elCellMenuSelect && elCellMenuSelect.contains(t)) return;
+    resetGhostSelect();
+  }, { capture: true });
+
   // Phrase cell: tap selects; tap again opens menu.
   elTracker.addEventListener("pointerdown", (e) => {
     if (activeScreen !== "P") return;
@@ -2139,9 +2162,7 @@ function initUI() {
     applySelectionUI();
     focusMain();
 
-    if (already) {
-      openNativeCellMenu();
-    }
+    if (already) openNativeCellMenuAt(e.clientX, e.clientY);
   });
 
   function pointerDownSelectList(e, expectedScreen) {
@@ -2164,7 +2185,7 @@ function initUI() {
       renderSongView({ force: true });
       setStatusCursor();
       if (already) {
-        openNativeCellMenu();
+        openNativeCellMenuAt(e.clientX, e.clientY);
       }
       return;
     }
@@ -2175,7 +2196,7 @@ function initUI() {
     renderChainView({ force: true });
     setStatusCursor();
     if (already) {
-      openNativeCellMenu();
+      openNativeCellMenuAt(e.clientX, e.clientY);
     }
   }
 
