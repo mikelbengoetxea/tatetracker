@@ -371,21 +371,45 @@ function resetGhostSelect() {
   elCellMenuSelect.style.height = "1px";
 }
 
+function getSelectedEditCellElement() {
+  if (activeScreen === "P") {
+    return elTracker?.querySelector(".cell.cell--selected.editcell") ?? null;
+  }
+  if (activeScreen === "S") {
+    return elSongView?.querySelector(".list16__cell.list16__cell--selected.editcell") ?? null;
+  }
+  if (activeScreen === "C") {
+    return elChainView?.querySelector(".list16__cell.list16__cell--selected.editcell") ?? null;
+  }
+  return null;
+}
+
+function removeCellChevronsInRoot(root) {
+  if (!root) return;
+  root.querySelectorAll(".cell-chevron").forEach((n) => n.remove());
+}
+
+function syncCellChevronUI() {
+  removeCellChevronsInRoot(elTracker);
+  removeCellChevronsInRoot(elSongView);
+  removeCellChevronsInRoot(elChainView);
+  const el = getSelectedEditCellElement();
+  if (!(el instanceof HTMLElement)) return;
+  const ch = document.createElement("span");
+  ch.className = "cell-chevron";
+  ch.textContent = "▾";
+  ch.setAttribute("aria-hidden", "true");
+  el.appendChild(ch);
+}
+
 /** Park invisible native <select> over the selected edit cell for the active screen. */
 function syncGhostSelectToSelection() {
   if (!elCellMenuSelect) return;
 
-  let el = null;
-  if (activeScreen === "P") {
-    el = elTracker?.querySelector(".cell.cell--selected.editcell");
-  } else if (activeScreen === "S") {
-    el = elSongView?.querySelector(".list16__cell.list16__cell--selected.editcell");
-  } else if (activeScreen === "C") {
-    el = elChainView?.querySelector(".list16__cell.list16__cell--selected.editcell");
-  }
-
+  const el = getSelectedEditCellElement();
   if (!(el instanceof HTMLElement)) {
     resetGhostSelect();
+    syncCellChevronUI();
     return;
   }
 
@@ -394,6 +418,7 @@ function syncGhostSelectToSelection() {
   elCellMenuSelect.style.top = `${r.top}px`;
   elCellMenuSelect.style.width = `${r.width}px`;
   elCellMenuSelect.style.height = `${r.height}px`;
+  syncCellChevronUI();
 }
 
 function setStatus(msg) {
@@ -503,6 +528,7 @@ function renderTracker({ force = false } = {}) {
   for (let c = 0; c < COLS.length; c++) {
     const cell = document.createElement("div");
     cell.className = "cell";
+    if (COLS[c].key !== "row") cell.classList.add("editcell");
     cell.textContent = COLS[c].label;
     header.appendChild(cell);
   }
@@ -560,10 +586,10 @@ function renderSongView({ force = false } = {}) {
   header.className = "list16__row list16__row--header";
   header.innerHTML = `
     <div class="list16__cell">Row</div>
-    <div class="list16__cell">PU1</div>
-    <div class="list16__cell">PU2</div>
-    <div class="list16__cell">WAV</div>
-    <div class="list16__cell">NOI</div>
+    <div class="list16__cell editcell">PU1</div>
+    <div class="list16__cell editcell">PU2</div>
+    <div class="list16__cell editcell">WAV</div>
+    <div class="list16__cell editcell">NOI</div>
   `;
   list.appendChild(header);
 
@@ -606,8 +632,8 @@ function renderChainView({ force = false } = {}) {
   header.className = "list16__row list16__row--header";
   header.innerHTML = `
     <div class="list16__cell">Row</div>
-    <div class="list16__cell">PHR</div>
-    <div class="list16__cell">TSP</div>
+    <div class="list16__cell editcell">PHR</div>
+    <div class="list16__cell editcell">TSP</div>
   `;
   list.appendChild(header);
 

@@ -191,7 +191,7 @@ html {
   border: 1px solid var(--grid);
   background: linear-gradient(180deg, rgba(12, 16, 22, 0.85) 0%, rgba(12, 16, 22, 0.65) 100%);
   border-radius: 12px;
-  padding: 12px;
+  padding: 0;
 }
 .panel--grow {
   height: 100%;
@@ -239,6 +239,13 @@ html {
 .tracker-header, .tracker-row {
   display: flex;
 }
+.tracker-header .cell,
+.tracker-row .cell {
+  flex: 1 0 0;
+  min-width: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+}
 .tracker-header {
   background: #0a0f15;
   border-bottom: 1px solid var(--grid);
@@ -269,6 +276,9 @@ html {
   flex: 1 1 0;
   min-width: 0;
 }
+.cell.editcell {
+  padding: 6px 8px;
+}
 .cell:last-child { border-right: none; }
 
 .tracker-row {
@@ -291,20 +301,15 @@ html {
   background: rgba(26, 43, 61, 0.55);
 }
 
-.cell--selected.editcell {
-  padding-right: 22px;
-}
-.cell--selected.editcell::after {
-  content: "▾";
+.cell-chevron {
   position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-size: 11px;
+  right: 2px;
+  bottom: 2px;
+  font-size: 8px;
   line-height: 1;
+  pointer-events: none;
   opacity: 0.38;
   color: rgba(199, 251, 255, 0.85);
-  pointer-events: none;
 }
 
 .cell--flash {
@@ -388,6 +393,12 @@ html {
   flex: 1 1 0;
   min-height: 0;
 }
+.list16__row .list16__cell {
+  flex: 1 0 0;
+  min-width: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+}
 .list16--song .list16__row { }
 .list16--chain .list16__row { }
 .list16__row--header {
@@ -415,27 +426,15 @@ html {
   flex: 1 1 0;
   min-width: 0;
 }
+.list16__cell.editcell {
+  padding: 6px 8px;
+}
 .list16__cell:last-child { border-right: none; }
 /* Hover row highlight removed (hardware-style UI). */
 .list16__cell--selected {
   outline: 2px solid rgba(103, 232, 249, 0.55);
   outline-offset: -2px;
   background: rgba(26, 43, 61, 0.55);
-}
-.list16__cell--selected.editcell {
-  padding-right: 22px;
-}
-.list16__cell--selected.editcell::after {
-  content: "▾";
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-size: 11px;
-  line-height: 1;
-  opacity: 0.38;
-  color: rgba(199, 251, 255, 0.85);
-  pointer-events: none;
 }
 .list16__row--playhead {
   /* Hollow/overlay row highlight (cursor stays visible) */
