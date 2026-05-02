@@ -121,6 +121,26 @@
       </section>
     </main>
 
+    <div id="importOverlay" class="import-overlay" hidden aria-hidden="true">
+      <div class="import-overlay__panel" role="dialog" aria-labelledby="importOverlayTitle" aria-modal="true">
+        <h2 id="importOverlayTitle" class="import-overlay__title">Import project</h2>
+        <textarea
+          id="importOverlayText"
+          class="import-overlay__textarea"
+          spellcheck="false"
+          autocorrect="off"
+          autocomplete="off"
+          autocapitalize="off"
+          rows="14"
+          aria-label="Paste project JSON"
+        ></textarea>
+        <div class="import-overlay__actions">
+          <button type="button" id="importOverlayCancel" class="btn">Cancel</button>
+          <button type="button" id="importOverlayLoad" class="btn btn--primary">Load</button>
+        </div>
+      </div>
+    </div>
+
     <div class="nudge-bar" aria-label="Nudge">
       <button class="nudge-bar__btn" type="button" data-nudge="inc" aria-label="Nudge up">+</button>
       <button class="nudge-bar__btn" type="button" data-nudge="dec" aria-label="Nudge down">-</button>

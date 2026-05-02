@@ -292,6 +292,10 @@ const elPlay = document.getElementById("playBtn");
 const elBpm = document.getElementById("bpmInput");
 const elExport = document.getElementById("exportBtn");
 const elImportBtn = document.getElementById("importBtn");
+const elImportOverlay = document.getElementById("importOverlay");
+const elImportOverlayText = document.getElementById("importOverlayText");
+const elImportOverlayLoad = document.getElementById("importOverlayLoad");
+const elImportOverlayCancel = document.getElementById("importOverlayCancel");
 const elReset = document.getElementById("resetBtn");
 const elPulse1Width = document.getElementById("pulse1Width");
 const elPulse2Width = document.getElementById("pulse2Width");
@@ -1951,19 +1955,37 @@ function sanitizeImportedProjectJson(code) {
     .replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
+/** @returns {boolean} true if project was loaded */
 function importSongCode(code) {
   const cleanCode = sanitizeImportedProjectJson(code);
-  if (!cleanCode) return;
+  if (!cleanCode) return false;
   let parsed;
   try {
     parsed = JSON.parse(cleanCode);
   } catch {
     console.error("Failed JSON string:", cleanCode);
     setStatus("Import failed: JSON syntax error");
-    return;
+    return false;
   }
   state = coerceProjectState(parsed);
   afterProjectLoaded("Imported project JSON.");
+  return true;
+}
+
+function showImportOverlay() {
+  if (!elImportOverlay || !elImportOverlayText) return;
+  elImportOverlayText.value = "";
+  elImportOverlay.removeAttribute("hidden");
+  elImportOverlay.setAttribute("aria-hidden", "false");
+  window.requestAnimationFrame(() => {
+    elImportOverlayText.focus({ preventScroll: true });
+  });
+}
+
+function hideImportOverlay() {
+  if (!elImportOverlay) return;
+  elImportOverlay.setAttribute("hidden", "");
+  elImportOverlay.setAttribute("aria-hidden", "true");
 }
 
 function coerceProjectState(parsed) {
@@ -2224,9 +2246,14 @@ function initUI() {
     exportSongCode().catch(() => setStatus("Export failed."));
   });
   elImportBtn?.addEventListener("click", () => {
-    const code = window.prompt("Paste project JSON:");
-    if (code == null) return;
-    importSongCode(code);
+    showImportOverlay();
+  });
+  elImportOverlayCancel?.addEventListener("click", () => {
+    hideImportOverlay();
+  });
+  elImportOverlayLoad?.addEventListener("click", () => {
+    const raw = elImportOverlayText?.value ?? "";
+    if (importSongCode(raw)) hideImportOverlay();
   });
   elReset?.addEventListener("click", () => resetProject());
 
@@ -2383,6 +2410,16 @@ function initUI() {
 
   function handleKeyDown(e) {
     if (document.activeElement === elBpm) return;
+    if (elImportOverlay && !elImportOverlay.hasAttribute("hidden")) {
+      const ae = document.activeElement;
+      if (ae && elImportOverlay.contains(ae)) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          hideImportOverlay();
+        }
+        return;
+      }
+    }
 
     if (e.code === "ShiftRight") {
       keyState.select = true;
