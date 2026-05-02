@@ -291,7 +291,7 @@ const elMasterStart = document.getElementById("masterStartBtn");
 const elPlay = document.getElementById("playBtn");
 const elBpm = document.getElementById("bpmInput");
 const elExport = document.getElementById("exportBtn");
-const elImport = document.getElementById("importInput");
+const elImportBtn = document.getElementById("importBtn");
 const elReset = document.getElementById("resetBtn");
 const elPulse1Width = document.getElementById("pulse1Width");
 const elPulse2Width = document.getElementById("pulse2Width");
@@ -1872,10 +1872,37 @@ function togglePlayback() {
   else startPhrasePlayback();
 }
 
-function exportSongCode() {
+async function exportSongCode() {
   const json = JSON.stringify(state);
-  navigator.clipboard?.writeText(json).catch(() => {});
-  setStatus("COPIED");
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(json);
+      copied = true;
+    }
+  } catch {
+    copied = false;
+  }
+  if (copied) {
+    setStatus("COPIED");
+    return;
+  }
+  try {
+    if (typeof navigator.share === "function") {
+      await navigator.share({
+        title: "Tate Tracker project",
+        text: json,
+      });
+      setStatus("Shared project JSON.");
+      return;
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      setStatus("Export cancelled.");
+      return;
+    }
+  }
+  setStatus("Could not copy to clipboard. Try Share from a supported browser, or Export on desktop.");
 }
 
 function importSongCode(code) {
@@ -2042,7 +2069,6 @@ function resetProject() {
   keyState.a = false;
   keyState.select = false;
 
-  if (elImport) elImport.value = "";
   afterProjectLoaded("Reset project to default state.");
 }
 
@@ -2143,12 +2169,15 @@ function initUI() {
   bindMixer(2, elMixVol2, elMixVol2Val);
   bindMixer(3, elMixVol3, elMixVol3Val);
 
-  elExport.addEventListener("click", () => exportSongCode());
-  elImport.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
-    importSongCode(elImport.value);
-    elImport.select();
+  elExport.addEventListener("click", () => {
+    exportSongCode().catch(() => setStatus("Export failed."));
+  });
+  elImportBtn?.addEventListener("click", () => {
+    const raw = window.prompt("Paste your project JSON code here:");
+    if (raw == null) return;
+    const s = String(raw).trim();
+    if (!s) return;
+    importSongCode(s);
   });
   elReset?.addEventListener("click", () => resetProject());
 
@@ -2304,7 +2333,7 @@ function initUI() {
   });
 
   function handleKeyDown(e) {
-    if (document.activeElement === elImport || document.activeElement === elBpm) return;
+    if (document.activeElement === elBpm) return;
 
     if (e.code === "ShiftRight") {
       keyState.select = true;

@@ -82,7 +82,7 @@ html {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 12px;
   flex-wrap: nowrap; /* strict: never second line */
   min-width: 0;
   overflow: hidden;
@@ -115,26 +115,27 @@ html {
   display: grid;
   gap: 4px;
 }
-.control-group--wide {
-  width: auto;
-  flex: 1 1 160px;
-  min-width: 0;
-  max-width: none;
-}
 .controls .btn { white-space: nowrap; }
 .controls .input { min-width: 0; }
 
 .controls > * { flex-shrink: 1; }
 .btn { width: auto; }
-.input--import { width: 6ch; }
+.topbar .btn--header-action {
+  min-height: 44px;
+  padding-left: 14px;
+  padding-right: 14px;
+}
 .btn--icon {
-  width: 34px;
-  height: 34px;
+  min-width: 44px;
+  min-height: 44px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   line-height: 1;
+  font-size: 1.15em;
 }
 
 .label { font-size: 0.75em; }
