@@ -11,7 +11,7 @@
       <div class="controls">
         <button id="masterStartBtn" class="btn btn--primary header-btn btn--master" type="button" aria-label="Master Start" title="Master Start">🔇</button>
 
-        <button type="button" id="bpmSettingsBtn" class="btn header-btn" aria-label="BPM and Bluetooth latency" title="BPM & latency">🎵</button>
+        <button type="button" id="bpmSettingsBtn" class="btn header-btn" aria-label="Timing: BPM and playhead offset" title="Timing (BPM & offset)">🕒</button>
 
         <button id="playBtn" class="btn btn--play header-btn header-btn--transport" type="button" aria-label="Play/Pause" title="Play/Pause (Space)">▶️</button>
 
@@ -129,13 +129,12 @@
           </div>
           <input id="settingsBpmSlider" class="settings-overlay__range" type="range" min="40" max="300" step="1" aria-valuemin="40" aria-valuemax="300" />
         </div>
-        <div id="settingsLatRow" class="settings-overlay__row settings-overlay__row--latency">
+        <div class="settings-overlay__row">
           <div class="settings-overlay__labelrow">
-            <label class="settings-overlay__label" for="settingsLatSlider">BT compensation</label>
+            <label class="settings-overlay__label" for="settingsLatSlider">Playhead offset</label>
             <span id="settingsLatVal" class="settings-overlay__value mono">0</span>
             <span class="settings-overlay__unit">ms</span>
           </div>
-          <span id="settingsLatHint" class="settings-overlay__hint" aria-live="polite"></span>
           <input id="settingsLatSlider" class="settings-overlay__range" type="range" min="0" max="500" step="1" aria-valuemin="0" aria-valuemax="500" />
         </div>
         <div class="settings-overlay__actions">

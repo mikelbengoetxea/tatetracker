@@ -5,8 +5,6 @@ const STORAGE_KEY = "tate-tracker:v1";
 const ROWS = 16;
 const BPM_RANGE_MIN = 40;
 const BPM_RANGE_MAX = 300;
-/** If `outputLatency` is below this (seconds), treat as non-Bluetooth / low-latency output. */
-const BT_LATENCY_THRESHOLD_SEC = 0.06;
 const SONG_COLS = [
   { key: "PU1", label: "PU1" },
   { key: "PU2", label: "PU2" },
@@ -290,7 +288,6 @@ let playheadScheduleGen = 0;
 /** AudioContext time of first phrase step (for visual playhead from `currentTime - delay`). */
 let phrasePlayheadAnchorTime = null;
 let phrasePlayheadRafId = 0;
-let settingsOverlayRafId = 0;
 
 // Modifier tracking
 let isZPressed = false;
@@ -308,8 +305,6 @@ const elSettingsBpmSlider = document.getElementById("settingsBpmSlider");
 const elSettingsBpmVal = document.getElementById("settingsBpmVal");
 const elSettingsLatSlider = document.getElementById("settingsLatSlider");
 const elSettingsLatVal = document.getElementById("settingsLatVal");
-const elSettingsLatHint = document.getElementById("settingsLatHint");
-const elSettingsLatRow = document.getElementById("settingsLatRow");
 const elSettingsOverlayDone = document.getElementById("settingsOverlayDone");
 const elExport = document.getElementById("exportBtn");
 const elImportBtn = document.getElementById("importBtn");
@@ -1462,7 +1457,7 @@ function applyBpmFromSlider() {
 }
 
 function applyVisualOffsetFromSlider() {
-  if (!elSettingsLatSlider || elSettingsLatSlider.disabled) return;
+  if (!elSettingsLatSlider) return;
   const ms = clamp(parseInt(elSettingsLatSlider.value, 10) || 0, 0, 500);
   state.visualOffsetMs = ms;
   if (elSettingsLatVal) elSettingsLatVal.textContent = String(ms);
@@ -1482,42 +1477,17 @@ function syncSettingsFormFromState() {
   }
 }
 
-function refreshSettingsBtCompensationRow() {
-  if (!elSettingsLatSlider || !elSettingsLatHint || !elSettingsLatRow) return;
-  const lat = getOutputLatencySeconds();
-  const btActive = lat > BT_LATENCY_THRESHOLD_SEC;
-  elSettingsLatHint.textContent = btActive ? "(Bluetooth Active)" : "(Bluetooth not detected)";
-  elSettingsLatRow.classList.toggle("settings-overlay__row--bt-active", btActive);
-  elSettingsLatRow.classList.toggle("settings-overlay__row--bt-idle", !btActive);
-  elSettingsLatSlider.disabled = !btActive;
-  elSettingsLatSlider.setAttribute("aria-disabled", btActive ? "false" : "true");
-}
-
-function settingsOverlayTick() {
-  settingsOverlayRafId = 0;
-  if (!elSettingsOverlay || elSettingsOverlay.hasAttribute("hidden")) return;
-  refreshSettingsBtCompensationRow();
-  settingsOverlayRafId = requestAnimationFrame(settingsOverlayTick);
-}
-
 function showSettingsOverlay() {
   if (!elSettingsOverlay) return;
   syncSettingsFormFromState();
-  refreshSettingsBtCompensationRow();
   elSettingsOverlay.removeAttribute("hidden");
   elSettingsOverlay.setAttribute("aria-hidden", "false");
-  if (settingsOverlayRafId) cancelAnimationFrame(settingsOverlayRafId);
-  settingsOverlayRafId = requestAnimationFrame(settingsOverlayTick);
 }
 
 function hideSettingsOverlay() {
   if (!elSettingsOverlay) return;
   elSettingsOverlay.setAttribute("hidden", "");
   elSettingsOverlay.setAttribute("aria-hidden", "true");
-  if (settingsOverlayRafId) {
-    cancelAnimationFrame(settingsOverlayRafId);
-    settingsOverlayRafId = 0;
-  }
 }
 
 function stopPhrasePlayheadRaf() {
@@ -1541,7 +1511,8 @@ function startPhrasePlayheadRafLoop() {
 }
 
 /**
- * Playhead time aligned with what the user hears: `visualTime = audioCtx.currentTime - totalDelay`.
+ * Playhead time aligned with what the user hears:
+ * totalDelay = audioCtx.outputLatency + state.visualOffsetMs/1000; visualTime = audioCtx.currentTime - totalDelay.
  */
 function updatePhrasePlayheadFromVisualTime() {
   const raw = Tone.getContext()?.rawContext;
@@ -1811,12 +1782,13 @@ function getOutputLatencySeconds() {
   return 0;
 }
 
+/** Browser `outputLatency` plus manual playhead offset (`state.visualOffsetMs`). */
 function getTotalPlayheadDelaySeconds() {
   return Math.max(0, getOutputLatencySeconds() + (Number(state.visualOffsetMs) || 0) / 1000);
 }
 
 /**
- * Defer playhead UI until roughly when this step is heard (Bluetooth / output buffer delay).
+ * Defer playhead UI until roughly when this step is heard (output latency + manual offset).
  * @param {number} audioContextEventTime
  * @param {number} scheduleGen
  * @param {"P"|"C"|"S"} mode
