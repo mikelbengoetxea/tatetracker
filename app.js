@@ -1890,7 +1890,7 @@ async function exportSongCode() {
   try {
     if (typeof navigator.share === "function") {
       await navigator.share({
-        title: "Tate Tracker project",
+        title: "Tate Tracker Project",
         text: json,
       });
       setStatus("Shared project JSON.");
@@ -1905,14 +1905,26 @@ async function exportSongCode() {
   setStatus("Could not copy to clipboard. Try Share from a supported browser, or Export on desktop.");
 }
 
+function sanitizeImportedProjectJson(code) {
+  return String(code ?? "")
+    .trim()
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\s/g, "");
+}
+
 function importSongCode(code) {
+  const cleanCode = sanitizeImportedProjectJson(code);
+  if (!cleanCode) return;
+  let parsed;
   try {
-    const parsed = JSON.parse(String(code ?? "").trim());
-    state = coerceProjectState(parsed);
-    afterProjectLoaded("Imported project JSON.");
+    parsed = JSON.parse(cleanCode);
   } catch {
-    setStatus("Import failed. Invalid JSON.");
+    setStatus("Import failed: JSON syntax error");
+    return;
   }
+  state = coerceProjectState(parsed);
+  afterProjectLoaded("Imported project JSON.");
 }
 
 function coerceProjectState(parsed) {
@@ -2173,11 +2185,9 @@ function initUI() {
     exportSongCode().catch(() => setStatus("Export failed."));
   });
   elImportBtn?.addEventListener("click", () => {
-    const raw = window.prompt("Paste your project JSON code here:");
-    if (raw == null) return;
-    const s = String(raw).trim();
-    if (!s) return;
-    importSongCode(s);
+    const code = window.prompt("Paste project JSON:");
+    if (code == null) return;
+    importSongCode(code);
   });
   elReset?.addEventListener("click", () => resetProject());
 

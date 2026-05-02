@@ -78,13 +78,14 @@ html {
 }
 
 .controls {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 12px;
   flex-wrap: nowrap; /* strict: never second line */
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
 }
 
