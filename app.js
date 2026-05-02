@@ -431,12 +431,15 @@ function setStatus(msg) {
 
 function syncPlayButtonUI() {
   if (!elPlay) return;
-  elPlay.textContent = isPlaying ? "⏸" : "▶";
+  elPlay.textContent = isPlaying ? "⏸️" : "▶️";
 }
 
 function syncMasterStartButtonUI() {
   if (!elMasterStart) return;
   elMasterStart.classList.toggle("btn--master--live", engineReady);
+  elMasterStart.textContent = engineReady ? "🔊" : "🔇";
+  elMasterStart.title = engineReady ? "Audio engine on" : "Master Start";
+  elMasterStart.setAttribute("aria-label", engineReady ? "Audio engine on" : "Master Start");
 }
 
 function viewStatusText() {
