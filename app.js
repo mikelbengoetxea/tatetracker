@@ -3,6 +3,10 @@
 const STORAGE_KEY = "tate-tracker:v1";
 
 const ROWS = 16;
+const BPM_RANGE_MIN = 40;
+const BPM_RANGE_MAX = 300;
+/** If `outputLatency` is below this (seconds), treat as non-Bluetooth / low-latency output. */
+const BT_LATENCY_THRESHOLD_SEC = 0.06;
 const SONG_COLS = [
   { key: "PU1", label: "PU1" },
   { key: "PU2", label: "PU2" },
@@ -168,6 +172,7 @@ function defaultState() {
   };
   return {
     bpm: 120,
+    visualOffsetMs: 0,
     pulse1Width: 50,
     pulse2Width: 50,
     wavType: "triangle",
@@ -190,7 +195,8 @@ function loadState() {
     const parsed = JSON.parse(raw);
     const s = defaultState();
 
-    if (Number.isFinite(parsed?.bpm)) s.bpm = clamp(parsed.bpm, 30, 300);
+    if (Number.isFinite(parsed?.bpm)) s.bpm = clamp(parsed.bpm, BPM_RANGE_MIN, BPM_RANGE_MAX);
+    if (Number.isFinite(parsed?.visualOffsetMs)) s.visualOffsetMs = clamp(parsed.visualOffsetMs | 0, 0, 500);
     if (Number.isFinite(parsed?.pulse1Width)) s.pulse1Width = parsed.pulse1Width;
     if (Number.isFinite(parsed?.pulse2Width)) s.pulse2Width = parsed.pulse2Width;
     if (typeof parsed?.wavType === "string") s.wavType = parsed.wavType;
@@ -279,10 +285,12 @@ let selCol = 1; // default to Note
 let isPlaying = false;
 let playRow = -1;
 
-/** Seconds, added to `AudioContext.outputLatency` for playhead sync (tweak if auto estimate is off). */
-let manualLatencyOffset = 0;
 /** Bumps on each transport start/stop so deferred playhead callbacks don’t apply after stop. */
 let playheadScheduleGen = 0;
+/** AudioContext time of first phrase step (for visual playhead from `currentTime - delay`). */
+let phrasePlayheadAnchorTime = null;
+let phrasePlayheadRafId = 0;
+let settingsOverlayRafId = 0;
 
 // Modifier tracking
 let isZPressed = false;
@@ -294,7 +302,15 @@ const elStatusLeft = document.getElementById("statusLeft");
 const elStatusRight = document.getElementById("statusRight");
 const elMasterStart = document.getElementById("masterStartBtn");
 const elPlay = document.getElementById("playBtn");
-const elBpm = document.getElementById("bpmInput");
+const elBpmSettingsBtn = document.getElementById("bpmSettingsBtn");
+const elSettingsOverlay = document.getElementById("settingsOverlay");
+const elSettingsBpmSlider = document.getElementById("settingsBpmSlider");
+const elSettingsBpmVal = document.getElementById("settingsBpmVal");
+const elSettingsLatSlider = document.getElementById("settingsLatSlider");
+const elSettingsLatVal = document.getElementById("settingsLatVal");
+const elSettingsLatHint = document.getElementById("settingsLatHint");
+const elSettingsLatRow = document.getElementById("settingsLatRow");
+const elSettingsOverlayDone = document.getElementById("settingsOverlayDone");
 const elExport = document.getElementById("exportBtn");
 const elImportBtn = document.getElementById("importBtn");
 const elImportOverlay = document.getElementById("importOverlay");
@@ -1435,12 +1451,111 @@ function handleArrowWithA(key) {
   return false;
 }
 
-function applyBpmFromUI() {
-  const bpm = clamp(parseInt(elBpm.value, 10) || 120, 30, 300);
+function applyBpmFromSlider() {
+  if (!elSettingsBpmSlider) return;
+  const bpm = clamp(parseInt(elSettingsBpmSlider.value, 10) || 120, BPM_RANGE_MIN, BPM_RANGE_MAX);
   state.bpm = bpm;
+  if (elSettingsBpmVal) elSettingsBpmVal.textContent = String(bpm);
   saveState();
   if (engineReady) Tone.Transport.bpm.value = bpm;
   setStatus(`BPM = ${bpm}.`);
+}
+
+function applyVisualOffsetFromSlider() {
+  if (!elSettingsLatSlider || elSettingsLatSlider.disabled) return;
+  const ms = clamp(parseInt(elSettingsLatSlider.value, 10) || 0, 0, 500);
+  state.visualOffsetMs = ms;
+  if (elSettingsLatVal) elSettingsLatVal.textContent = String(ms);
+  saveState();
+}
+
+function syncSettingsFormFromState() {
+  if (elSettingsBpmSlider) {
+    const b = clamp(state.bpm ?? 120, BPM_RANGE_MIN, BPM_RANGE_MAX);
+    elSettingsBpmSlider.value = String(b);
+    if (elSettingsBpmVal) elSettingsBpmVal.textContent = String(b);
+  }
+  if (elSettingsLatSlider) {
+    const ms = clamp(Number(state.visualOffsetMs) || 0, 0, 500);
+    elSettingsLatSlider.value = String(ms);
+    if (elSettingsLatVal) elSettingsLatVal.textContent = String(ms);
+  }
+}
+
+function refreshSettingsBtCompensationRow() {
+  if (!elSettingsLatSlider || !elSettingsLatHint || !elSettingsLatRow) return;
+  const lat = getOutputLatencySeconds();
+  const btActive = lat > BT_LATENCY_THRESHOLD_SEC;
+  elSettingsLatHint.textContent = btActive ? "(Bluetooth Active)" : "(Bluetooth not detected)";
+  elSettingsLatRow.classList.toggle("settings-overlay__row--bt-active", btActive);
+  elSettingsLatRow.classList.toggle("settings-overlay__row--bt-idle", !btActive);
+  elSettingsLatSlider.disabled = !btActive;
+  elSettingsLatSlider.setAttribute("aria-disabled", btActive ? "false" : "true");
+}
+
+function settingsOverlayTick() {
+  settingsOverlayRafId = 0;
+  if (!elSettingsOverlay || elSettingsOverlay.hasAttribute("hidden")) return;
+  refreshSettingsBtCompensationRow();
+  settingsOverlayRafId = requestAnimationFrame(settingsOverlayTick);
+}
+
+function showSettingsOverlay() {
+  if (!elSettingsOverlay) return;
+  syncSettingsFormFromState();
+  refreshSettingsBtCompensationRow();
+  elSettingsOverlay.removeAttribute("hidden");
+  elSettingsOverlay.setAttribute("aria-hidden", "false");
+  if (settingsOverlayRafId) cancelAnimationFrame(settingsOverlayRafId);
+  settingsOverlayRafId = requestAnimationFrame(settingsOverlayTick);
+}
+
+function hideSettingsOverlay() {
+  if (!elSettingsOverlay) return;
+  elSettingsOverlay.setAttribute("hidden", "");
+  elSettingsOverlay.setAttribute("aria-hidden", "true");
+  if (settingsOverlayRafId) {
+    cancelAnimationFrame(settingsOverlayRafId);
+    settingsOverlayRafId = 0;
+  }
+}
+
+function stopPhrasePlayheadRaf() {
+  if (phrasePlayheadRafId) {
+    cancelAnimationFrame(phrasePlayheadRafId);
+    phrasePlayheadRafId = 0;
+  }
+  phrasePlayheadAnchorTime = null;
+}
+
+function phrasePlayheadRafLoop() {
+  phrasePlayheadRafId = 0;
+  if (!isPlaying || playMode !== "P") return;
+  updatePhrasePlayheadFromVisualTime();
+  phrasePlayheadRafId = requestAnimationFrame(phrasePlayheadRafLoop);
+}
+
+function startPhrasePlayheadRafLoop() {
+  stopPhrasePlayheadRaf();
+  phrasePlayheadRafId = requestAnimationFrame(phrasePlayheadRafLoop);
+}
+
+/**
+ * Playhead time aligned with what the user hears: `visualTime = audioCtx.currentTime - totalDelay`.
+ */
+function updatePhrasePlayheadFromVisualTime() {
+  const raw = Tone.getContext()?.rawContext;
+  if (!raw || phrasePlayheadAnchorTime == null) return;
+  const totalDelay = getTotalPlayheadDelaySeconds();
+  const visualTime = raw.currentTime - totalDelay;
+  const stepDur = Tone.Time("16n").toSeconds();
+  const elapsed = Math.max(0, visualTime - phrasePlayheadAnchorTime);
+  const k = Math.floor(elapsed / stepDur + 1e-9);
+  const row = k % ROWS;
+  if (playRow !== row) {
+    playRow = row;
+    applyPlayheadUI();
+  }
 }
 
 function applyPulseWidth(which, pct) {
@@ -1626,7 +1741,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
 
   if (cmd === "T") {
     const raw = valByte == null ? state.bpm : clamp(valByte | 0, 0, 255);
-    const bpm = clamp(raw, 30, 300);
+    const bpm = clamp(raw, BPM_RANGE_MIN, BPM_RANGE_MAX);
     if (Tone.Transport?.bpm?.setValueAtTime) Tone.Transport.bpm.setValueAtTime(bpm, time);
     else if (Tone.Transport?.bpm?.value != null) Tone.Transport.bpm.value = bpm;
     return;
@@ -1696,8 +1811,8 @@ function getOutputLatencySeconds() {
   return 0;
 }
 
-function getCombinedOutputLatencySeconds() {
-  return Math.max(0, getOutputLatencySeconds() + manualLatencyOffset);
+function getTotalPlayheadDelaySeconds() {
+  return Math.max(0, getOutputLatencySeconds() + (Number(state.visualOffsetMs) || 0) / 1000);
 }
 
 /**
@@ -1708,7 +1823,7 @@ function getCombinedOutputLatencySeconds() {
  * @param {() => void} fn
  */
 function scheduleDeferredPlayheadUpdate(audioContextEventTime, scheduleGen, mode, fn) {
-  const when = audioContextEventTime + getCombinedOutputLatencySeconds();
+  const when = audioContextEventTime + getTotalPlayheadDelaySeconds();
   const run = () => {
     if (!isPlaying || scheduleGen !== playheadScheduleGen || playMode !== mode) return;
     fn();
@@ -1735,16 +1850,13 @@ function startPhrasePlayback() {
   applyPlayheadUI();
 
   playheadScheduleGen += 1;
-  const scheduleGen = playheadScheduleGen;
+  phrasePlayheadAnchorTime = null;
   const stepDur = Tone.Time("16n").toSeconds();
   let idx = 0;
 
   stepEventId = Tone.Transport.scheduleRepeat((time) => {
+    if (phrasePlayheadAnchorTime == null) phrasePlayheadAnchorTime = time;
     const row = idx % ROWS;
-    scheduleDeferredPlayheadUpdate(time, scheduleGen, "P", () => {
-      playRow = row;
-      applyPlayheadUI();
-    });
 
     const step = currentPhrase().steps[row];
     triggerStep(step, time, stepDur);
@@ -1753,6 +1865,7 @@ function startPhrasePlayback() {
   }, "16n");
 
   Tone.Transport.start();
+  startPhrasePlayheadRafLoop();
   setStatus("Playing. Enter to pause.");
 }
 
@@ -1919,6 +2032,7 @@ function stopPlayback() {
 
   isPlaying = false;
   playheadScheduleGen += 1;
+  stopPhrasePlayheadRaf();
   syncPlayButtonUI();
   if (stepEventId != null) {
     Tone.Transport.clear(stepEventId);
@@ -2061,7 +2175,8 @@ function coerceProjectState(parsed) {
   const s = defaultState();
   if (!parsed || typeof parsed !== "object") return s;
 
-  if (Number.isFinite(parsed?.bpm)) s.bpm = clamp(parsed.bpm, 30, 300);
+  if (Number.isFinite(parsed?.bpm)) s.bpm = clamp(parsed.bpm, BPM_RANGE_MIN, BPM_RANGE_MAX);
+  if (Number.isFinite(parsed?.visualOffsetMs)) s.visualOffsetMs = clamp(parsed.visualOffsetMs | 0, 0, 500);
   if (Number.isFinite(parsed?.pulse1Width)) s.pulse1Width = parsed.pulse1Width;
   if (Number.isFinite(parsed?.pulse2Width)) s.pulse2Width = parsed.pulse2Width;
   if (typeof parsed?.wavType === "string") s.wavType = parsed.wavType;
@@ -2145,7 +2260,7 @@ function coerceProjectState(parsed) {
 
 function afterProjectLoaded(msg) {
   saveState();
-  if (elBpm) elBpm.value = String(state.bpm);
+  syncSettingsFormFromState();
   if (elPulse1Width) elPulse1Width.value = String(state.pulse1Width);
   if (elPulse2Width) elPulse2Width.value = String(state.pulse2Width);
   if (elWavType) elWavType.value = String(state.wavType || "triangle");
@@ -2215,7 +2330,7 @@ function resetProject() {
 }
 
 function initUI() {
-  elBpm.value = String(state.bpm);
+  syncSettingsFormFromState();
   elPulse1Width.value = String(state.pulse1Width);
   elPulse2Width.value = String(state.pulse2Width);
   if (elWavType) elWavType.value = String(state.wavType || "triangle");
@@ -2266,7 +2381,12 @@ function initUI() {
   syncPlayButtonUI();
   syncMasterStartButtonUI();
 
-  elBpm.addEventListener("change", () => applyBpmFromUI());
+  elBpmSettingsBtn?.addEventListener("click", () => {
+    showSettingsOverlay();
+  });
+  elSettingsBpmSlider?.addEventListener("input", () => applyBpmFromSlider());
+  elSettingsLatSlider?.addEventListener("input", () => applyVisualOffsetFromSlider());
+  elSettingsOverlayDone?.addEventListener("click", () => hideSettingsOverlay());
   elPulse1Width.addEventListener("change", () => {
     state.pulse1Width = Number(elPulse1Width.value);
     saveState();
@@ -2479,7 +2599,16 @@ function initUI() {
   });
 
   function handleKeyDown(e) {
-    if (document.activeElement === elBpm) return;
+    if (elSettingsOverlay && !elSettingsOverlay.hasAttribute("hidden")) {
+      const ae = document.activeElement;
+      if (ae && elSettingsOverlay.contains(ae)) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          hideSettingsOverlay();
+        }
+        return;
+      }
+    }
     if (elImportOverlay && !elImportOverlay.hasAttribute("hidden")) {
       const ae = document.activeElement;
       if (ae && elImportOverlay.contains(ae)) {

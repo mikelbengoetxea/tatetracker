@@ -11,9 +11,7 @@
       <div class="controls">
         <button id="masterStartBtn" class="btn btn--primary header-btn btn--master" type="button" aria-label="Master Start" title="Master Start">🔇</button>
 
-        <div class="control-group">
-          <input id="bpmInput" class="input input--num input--header" type="number" min="30" max="300" step="1" value="120" placeholder="BPM" aria-label="BPM" />
-        </div>
+        <button type="button" id="bpmSettingsBtn" class="btn header-btn" aria-label="BPM and Bluetooth latency" title="BPM & latency">🎵</button>
 
         <button id="playBtn" class="btn btn--play header-btn header-btn--transport" type="button" aria-label="Play/Pause" title="Play/Pause (Space)">▶️</button>
 
@@ -120,6 +118,31 @@
         </div>
       </section>
     </main>
+
+    <div id="settingsOverlay" class="settings-overlay" hidden aria-hidden="true">
+      <div class="settings-overlay__panel" role="dialog" aria-labelledby="settingsOverlayTitle" aria-modal="true">
+        <h2 id="settingsOverlayTitle" class="settings-overlay__title">Timing</h2>
+        <div class="settings-overlay__row">
+          <div class="settings-overlay__labelrow">
+            <label class="settings-overlay__label" for="settingsBpmSlider">BPM</label>
+            <span id="settingsBpmVal" class="settings-overlay__value mono">120</span>
+          </div>
+          <input id="settingsBpmSlider" class="settings-overlay__range" type="range" min="40" max="300" step="1" aria-valuemin="40" aria-valuemax="300" />
+        </div>
+        <div id="settingsLatRow" class="settings-overlay__row settings-overlay__row--latency">
+          <div class="settings-overlay__labelrow">
+            <label class="settings-overlay__label" for="settingsLatSlider">BT compensation</label>
+            <span id="settingsLatVal" class="settings-overlay__value mono">0</span>
+            <span class="settings-overlay__unit">ms</span>
+          </div>
+          <span id="settingsLatHint" class="settings-overlay__hint" aria-live="polite"></span>
+          <input id="settingsLatSlider" class="settings-overlay__range" type="range" min="0" max="500" step="1" aria-valuemin="0" aria-valuemax="500" />
+        </div>
+        <div class="settings-overlay__actions">
+          <button type="button" id="settingsOverlayDone" class="btn btn--primary">Done</button>
+        </div>
+      </div>
+    </div>
 
     <div id="importOverlay" class="import-overlay" hidden aria-hidden="true">
       <div class="import-overlay__panel" role="dialog" aria-labelledby="importOverlayTitle" aria-modal="true">
