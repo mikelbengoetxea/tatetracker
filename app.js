@@ -434,6 +434,11 @@ function syncPlayButtonUI() {
   elPlay.textContent = isPlaying ? "⏸" : "▶";
 }
 
+function syncMasterStartButtonUI() {
+  if (!elMasterStart) return;
+  elMasterStart.classList.toggle("btn--master--live", engineReady);
+}
+
 function viewStatusText() {
   if (activeScreen === "S") return "SONG";
   if (activeScreen === "C") return `CHAIN ${idHex(activeChainId)}`;
@@ -1485,6 +1490,7 @@ async function masterStart() {
   applyInstrumentSettingsFromState();
 
   engineReady = true;
+  syncMasterStartButtonUI();
   setStatus("Audio engine ready. Space to play.");
 }
 
@@ -2195,6 +2201,7 @@ function initUI() {
   // Desktop fallback
   elPlay.addEventListener("click", () => togglePlayback());
   syncPlayButtonUI();
+  syncMasterStartButtonUI();
 
   elBpm.addEventListener("change", () => applyBpmFromUI());
   elPulse1Width.addEventListener("change", () => {

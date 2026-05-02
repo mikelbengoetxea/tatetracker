@@ -106,6 +106,9 @@ html {
 }
 .btn:hover { border-color: #25415c; }
 .btn:active { transform: translateY(1px); }
+.topbar .controls > .btn:active {
+  transform: scale(0.95);
+}
 .btn--primary {
   border-color: #1d6b7a;
   background: linear-gradient(180deg, #0b2730 0%, #081a20 100%);
@@ -121,11 +124,65 @@ html {
 
 .controls > * { flex-shrink: 1; }
 .btn { width: auto; }
-.topbar .btn--header-action {
+
+/* Header: consistent tool buttons (power, play, export, import, reset) */
+.topbar .controls > .btn--header-icon {
+  flex-shrink: 0;
+  box-sizing: border-box;
+  min-width: 44px;
   min-height: 44px;
-  padding-left: 14px;
-  padding-right: 14px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  font-size: 1.2em;
+  background: #0a0f15;
+  border: 1px solid var(--grid);
+  color: var(--text);
 }
+.topbar .btn--master {
+  font-size: 1.35em;
+  line-height: 1;
+}
+.topbar .btn--master.btn--primary:not(.btn--master--live) {
+  background: linear-gradient(180deg, #0b2730 0%, #081a20 100%);
+  border-color: #1d6b7a;
+  color: #c7fbff;
+}
+.topbar .btn--master.btn--master--live {
+  border-color: rgba(74, 222, 128, 0.85);
+  background: rgba(34, 197, 94, 0.2);
+  color: #f0fdf4;
+  box-shadow:
+    0 0 14px rgba(34, 197, 94, 0.4),
+    0 0 3px rgba(187, 247, 208, 0.65);
+}
+.topbar .btn--play.btn--header-icon {
+  border-color: rgba(34, 197, 94, 0.65);
+  background: rgba(34, 197, 94, 0.12);
+  color: #bbf7d0;
+}
+.topbar .btn--play.btn--header-icon:hover {
+  border-color: rgba(34, 197, 94, 0.9);
+}
+.topbar .input--header.input--num {
+  width: 52px;
+  min-height: 44px;
+  height: 44px;
+  padding: 0 6px;
+  text-align: center;
+  font-size: 0.95em;
+  flex-shrink: 0;
+}
+.topbar .control-group {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
 .btn--icon {
   min-width: 44px;
   min-height: 44px;
@@ -156,6 +213,9 @@ html {
 }
 .btn--play:hover { border-color: rgba(34, 197, 94, 0.9); }
 .btn--play:active { transform: translateY(1px); }
+.topbar .controls > .btn--play:active {
+  transform: scale(0.95);
+}
 
 .label {
   font-size: 11px;
