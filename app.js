@@ -1872,34 +1872,72 @@ function togglePlayback() {
   else startPhrasePlayback();
 }
 
+function shouldPrioritizeWebShareForExport() {
+  if (typeof navigator === "undefined" || typeof navigator.share !== "function") return false;
+  try {
+    if (window.matchMedia("(pointer: coarse)").matches) return true;
+  } catch {
+    /* ignore */
+  }
+  const ua = navigator.userAgent || "";
+  return /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+}
+
 async function exportSongCode() {
   const json = JSON.stringify(state);
-  let copied = false;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(json);
-      copied = true;
-    }
-  } catch {
-    copied = false;
-  }
-  if (copied) {
-    setStatus("COPIED");
-    return;
-  }
-  try {
-    if (typeof navigator.share === "function") {
-      await navigator.share({
-        title: "Tate Tracker Project",
-        text: json,
-      });
+  const sharePayload = { title: "Tate Tracker Project", text: json };
+
+  const tryShare = async () => {
+    if (typeof navigator.share !== "function") return false;
+    await navigator.share(sharePayload);
+    return true;
+  };
+
+  const tryClipboard = async () => {
+    if (!navigator.clipboard?.writeText) return false;
+    await navigator.clipboard.writeText(json);
+    return true;
+  };
+
+  const mobileFirst = shouldPrioritizeWebShareForExport();
+
+  if (mobileFirst) {
+    try {
+      await tryShare();
       setStatus("Shared project JSON.");
       return;
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        setStatus("Export cancelled.");
+        return;
+      }
     }
-  } catch (e) {
-    if (e && e.name === "AbortError") {
-      setStatus("Export cancelled.");
+    try {
+      if (await tryClipboard()) {
+        setStatus("COPIED");
+        return;
+      }
+    } catch {
+      /* fall through */
+    }
+  } else {
+    try {
+      if (await tryClipboard()) {
+        setStatus("COPIED");
+        return;
+      }
+    } catch {
+      /* fall through */
+    }
+    try {
+      await tryShare();
+      setStatus("Shared project JSON.");
       return;
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        setStatus("Export cancelled.");
+        return;
+      }
     }
   }
   setStatus("Could not copy to clipboard. Try Share from a supported browser, or Export on desktop.");
@@ -1910,7 +1948,7 @@ function sanitizeImportedProjectJson(code) {
     .trim()
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2018\u2019]/g, "'")
-    .replace(/\s/g, "");
+    .replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
 function importSongCode(code) {
@@ -1920,6 +1958,7 @@ function importSongCode(code) {
   try {
     parsed = JSON.parse(cleanCode);
   } catch {
+    console.error("Failed JSON string:", cleanCode);
     setStatus("Import failed: JSON syntax error");
     return;
   }
