@@ -279,6 +279,11 @@ let selCol = 1; // default to Note
 let isPlaying = false;
 let playRow = -1;
 
+/** Seconds, added to `AudioContext.outputLatency` for playhead sync (tweak if auto estimate is off). */
+let manualLatencyOffset = 0;
+/** Bumps on each transport start/stop so deferred playhead callbacks don’t apply after stop. */
+let playheadScheduleGen = 0;
+
 // Modifier tracking
 let isZPressed = false;
 let isXPressed = false;
@@ -1679,6 +1684,44 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   }
 }
 
+function getOutputLatencySeconds() {
+  try {
+    const raw = Tone.getContext()?.rawContext;
+    if (raw && typeof raw.outputLatency === "number" && Number.isFinite(raw.outputLatency)) {
+      return Math.max(0, raw.outputLatency);
+    }
+  } catch {
+    /* ignore */
+  }
+  return 0;
+}
+
+function getCombinedOutputLatencySeconds() {
+  return Math.max(0, getOutputLatencySeconds() + manualLatencyOffset);
+}
+
+/**
+ * Defer playhead UI until roughly when this step is heard (Bluetooth / output buffer delay).
+ * @param {number} audioContextEventTime
+ * @param {number} scheduleGen
+ * @param {"P"|"C"|"S"} mode
+ * @param {() => void} fn
+ */
+function scheduleDeferredPlayheadUpdate(audioContextEventTime, scheduleGen, mode, fn) {
+  const when = audioContextEventTime + getCombinedOutputLatencySeconds();
+  const run = () => {
+    if (!isPlaying || scheduleGen !== playheadScheduleGen || playMode !== mode) return;
+    fn();
+  };
+  if (typeof Tone.Draw !== "undefined" && typeof Tone.Draw.schedule === "function") {
+    Tone.Draw.schedule(run, when);
+  } else {
+    const raw = Tone.getContext()?.rawContext;
+    const now = raw?.currentTime ?? 0;
+    window.setTimeout(run, Math.max(0, (when - now) * 1000));
+  }
+}
+
 function startPhrasePlayback() {
   if (!engineReady) return;
   if (isPlaying) return;
@@ -1691,13 +1734,17 @@ function startPhrasePlayback() {
   playRow = -1;
   applyPlayheadUI();
 
+  playheadScheduleGen += 1;
+  const scheduleGen = playheadScheduleGen;
   const stepDur = Tone.Time("16n").toSeconds();
   let idx = 0;
 
   stepEventId = Tone.Transport.scheduleRepeat((time) => {
     const row = idx % ROWS;
-    playRow = row;
-    applyPlayheadUI();
+    scheduleDeferredPlayheadUpdate(time, scheduleGen, "P", () => {
+      playRow = row;
+      applyPlayheadUI();
+    });
 
     const step = currentPhrase().steps[row];
     triggerStep(step, time, stepDur);
@@ -1727,35 +1774,42 @@ function startChainPlayback() {
   playChainRow = chainRow;
   renderChainView();
 
+  playheadScheduleGen += 1;
+  const scheduleGen = playheadScheduleGen;
+
   stepEventId = Tone.Transport.scheduleRepeat((time) => {
-    const chain = state.chains?.[activeChainId] ?? [];
-    let entry = normalizeChainRow(chain[chainRow]);
-    let phraseId = entry.phraseId;
-    if (phraseId == null) {
-      chainRow = 0;
-      entry = normalizeChainRow(chain[chainRow]);
-      phraseId = entry.phraseId;
-      playChainRow = chainRow;
-      if (activeScreen === "C") renderChainView();
+    try {
+      const chain = state.chains?.[activeChainId] ?? [];
+      let entry = normalizeChainRow(chain[chainRow]);
+      let phraseId = entry.phraseId;
       if (phraseId == null) {
-        stepIdx = (stepIdx + 1) % ROWS;
-        return;
+        chainRow = 0;
+        entry = normalizeChainRow(chain[chainRow]);
+        phraseId = entry.phraseId;
+        if (phraseId == null) {
+          stepIdx = (stepIdx + 1) % ROWS;
+          return;
+        }
       }
-    }
 
-    const phrase = state.phrases?.[phraseId];
-    const step = phrase?.steps?.[stepIdx];
-    if (step) triggerStep(step, time, stepDur, { transposeSemis: semisFromTspByte(entry.tsp) });
+      const phrase = state.phrases?.[phraseId];
+      const step = phrase?.steps?.[stepIdx];
+      if (step) triggerStep(step, time, stepDur, { transposeSemis: semisFromTspByte(entry.tsp) });
 
-    if (stepIdx === ROWS - 1) {
-      const nextRow = chainRow + 1;
-      if (nextRow >= ROWS || chain[nextRow] == null) chainRow = 0;
-      else chainRow = nextRow;
-      playChainRow = chainRow;
-      if (activeScreen === "C") renderChainView();
-      stepIdx = 0;
-    } else {
-      stepIdx++;
+      if (stepIdx === ROWS - 1) {
+        const nextRow = chainRow + 1;
+        if (nextRow >= ROWS || chain[nextRow] == null) chainRow = 0;
+        else chainRow = nextRow;
+        stepIdx = 0;
+      } else {
+        stepIdx++;
+      }
+    } finally {
+      const cr = chainRow;
+      scheduleDeferredPlayheadUpdate(time, scheduleGen, "C", () => {
+        playChainRow = cr;
+        if (activeScreen === "C") renderChainView();
+      });
     }
   }, "16n");
 
@@ -1776,77 +1830,82 @@ function startSongPlayback() {
   applyPlayheadUI();
   if (activeScreen === "S") renderSongView(); // ensure Row 00 highlights immediately
 
+  playheadScheduleGen += 1;
+  const scheduleGen = playheadScheduleGen;
   const stepDur = Tone.Time("16n").toSeconds();
   let stepIdx = 0;
   let songRow = 0;
   let chainRow = 0;
 
   stepEventId = Tone.Transport.scheduleRepeat((time) => {
-    const songEntry = state.song?.[songRow];
-    const chainIds = Array.isArray(songEntry) ? songEntry : SONG_COLS.map((_, c) => (c === 0 ? songEntry : null));
+    try {
+      const songEntry = state.song?.[songRow];
+      const chainIds = Array.isArray(songEntry) ? songEntry : SONG_COLS.map((_, c) => (c === 0 ? songEntry : null));
 
-    const hasAny = chainIds?.some((v) => v != null);
-    if (!hasAny) {
-      songRow = 0;
-      chainRow = 0;
-      playSongRow = songRow;
-      playSongRow = songRow;
-      if (activeScreen === "S") renderSongView();
-      const firstEntry = state.song?.[songRow];
-      const firstIds = Array.isArray(firstEntry) ? firstEntry : SONG_COLS.map((_, c) => (c === 0 ? firstEntry : null));
-      if (!firstIds?.some((v) => v != null)) {
-        stepIdx = (stepIdx + 1) % ROWS;
-        return;
+      const hasAny = chainIds?.some((v) => v != null);
+      if (!hasAny) {
+        songRow = 0;
+        chainRow = 0;
+        const firstEntry = state.song?.[songRow];
+        const firstIds = Array.isArray(firstEntry) ? firstEntry : SONG_COLS.map((_, c) => (c === 0 ? firstEntry : null));
+        if (!firstIds?.some((v) => v != null)) {
+          stepIdx = (stepIdx + 1) % ROWS;
+          return;
+        }
       }
-    }
 
-    // Parallel trigger across 4 Song columns with fixed instrument mapping.
-    // PU1 -> channel 0, PU2 -> channel 1, WAV -> channel 2, NOI -> channel 3
-    for (let t = 0; t < 4; t++) {
-      const chainId = chainIds?.[t];
-      if (chainId == null) continue;
-      const chain = state.chains?.[chainId] ?? [];
-      let entry = normalizeChainRow(chain[chainRow]);
-      if (entry.phraseId == null) {
-        entry = normalizeChainRow(chain[0]);
-      }
-      const phraseId = entry.phraseId;
-      if (phraseId == null) continue;
-      const phrase = state.phrases?.[phraseId];
-      const step = phrase?.steps?.[stepIdx];
-      if (step) triggerStep(step, time, stepDur, { channelOverride: t, transposeSemis: semisFromTspByte(entry.tsp) });
-    }
-
-    if (stepIdx === ROWS - 1) {
-      const nextChainRow = chainRow + 1;
-      // Global chainRow drives which phrase-slot is being used in each chain.
-      // When the next chain row is empty for ALL active chains, advance the song row.
-      let anyHasNext = false;
+      // Parallel trigger across 4 Song columns with fixed instrument mapping.
+      // PU1 -> channel 0, PU2 -> channel 1, WAV -> channel 2, NOI -> channel 3
       for (let t = 0; t < 4; t++) {
         const chainId = chainIds?.[t];
         if (chainId == null) continue;
         const chain = state.chains?.[chainId] ?? [];
-        if (nextChainRow < ROWS && normalizeChainRow(chain[nextChainRow]).phraseId != null) {
-          anyHasNext = true;
-          break;
+        let entry = normalizeChainRow(chain[chainRow]);
+        if (entry.phraseId == null) {
+          entry = normalizeChainRow(chain[0]);
         }
+        const phraseId = entry.phraseId;
+        if (phraseId == null) continue;
+        const phrase = state.phrases?.[phraseId];
+        const step = phrase?.steps?.[stepIdx];
+        if (step) triggerStep(step, time, stepDur, { channelOverride: t, transposeSemis: semisFromTspByte(entry.tsp) });
       }
 
-      if (nextChainRow >= ROWS || !anyHasNext) {
-        chainRow = 0;
-        const nextSong = songRow + 1;
-        const nextEntry = state.song?.[nextSong];
-        const nextIds = Array.isArray(nextEntry) ? nextEntry : SONG_COLS.map((_, c) => (c === 0 ? nextEntry : null));
-        if (nextSong >= ROWS || !nextIds?.some((v) => v != null)) songRow = 0;
-        else songRow = nextSong;
-        playSongRow = songRow;
-        if (activeScreen === "S") renderSongView();
+      if (stepIdx === ROWS - 1) {
+        const nextChainRow = chainRow + 1;
+        // Global chainRow drives which phrase-slot is being used in each chain.
+        // When the next chain row is empty for ALL active chains, advance the song row.
+        let anyHasNext = false;
+        for (let t = 0; t < 4; t++) {
+          const chainId = chainIds?.[t];
+          if (chainId == null) continue;
+          const chain = state.chains?.[chainId] ?? [];
+          if (nextChainRow < ROWS && normalizeChainRow(chain[nextChainRow]).phraseId != null) {
+            anyHasNext = true;
+            break;
+          }
+        }
+
+        if (nextChainRow >= ROWS || !anyHasNext) {
+          chainRow = 0;
+          const nextSong = songRow + 1;
+          const nextEntry = state.song?.[nextSong];
+          const nextIds = Array.isArray(nextEntry) ? nextEntry : SONG_COLS.map((_, c) => (c === 0 ? nextEntry : null));
+          if (nextSong >= ROWS || !nextIds?.some((v) => v != null)) songRow = 0;
+          else songRow = nextSong;
+        } else {
+          chainRow = nextChainRow;
+        }
+        stepIdx = 0;
       } else {
-        chainRow = nextChainRow;
+        stepIdx++;
       }
-      stepIdx = 0;
-    } else {
-      stepIdx++;
+    } finally {
+      const sr = songRow;
+      scheduleDeferredPlayheadUpdate(time, scheduleGen, "S", () => {
+        playSongRow = sr;
+        if (activeScreen === "S") renderSongView();
+      });
     }
   }, "16n");
 
@@ -1859,6 +1918,7 @@ function stopPlayback() {
   if (!isPlaying) return;
 
   isPlaying = false;
+  playheadScheduleGen += 1;
   syncPlayButtonUI();
   if (stepEventId != null) {
     Tone.Transport.clear(stepEventId);
