@@ -1391,27 +1391,28 @@ function clearCellAt(screen, r, c) {
 function cellInSelectedRange(screen, r, c) {
   const rng = state.selectedRange;
   if (!rng || rng.screen !== screen) return false;
-  return r >= rng.startRow && r <= rng.endRow && c >= rng.startCol && c <= rng.endCol;
+  return r >= rng.r1 && r <= rng.r2 && c >= rng.c1 && c <= rng.c2;
 }
 
+/** Inclusive rectangle `{ r1, c1, r2, c2 }` with `r1 <= r2`, `c1 <= c2`. */
 function normalizeSelectedRangeRect(screen, ar, ac, br, bc) {
-  let r0 = Math.min(ar, br);
-  let r1 = Math.max(ar, br);
-  let c0 = Math.min(ac, bc);
-  let c1 = Math.max(ac, bc);
-  r0 = clamp(r0, 0, ROWS - 1);
+  let r1 = Math.min(ar, br);
+  let r2 = Math.max(ar, br);
+  let c1 = Math.min(ac, bc);
+  let c2 = Math.max(ac, bc);
   r1 = clamp(r1, 0, ROWS - 1);
+  r2 = clamp(r2, 0, ROWS - 1);
   if (screen === "S") {
-    c0 = clamp(c0, 0, SONG_COLS.length - 1);
     c1 = clamp(c1, 0, SONG_COLS.length - 1);
+    c2 = clamp(c2, 0, SONG_COLS.length - 1);
   } else if (screen === "C") {
-    c0 = clamp(c0, 0, 1);
     c1 = clamp(c1, 0, 1);
+    c2 = clamp(c2, 0, 1);
   } else if (screen === "P") {
-    c0 = clamp(c0, 1, COLS.length - 1);
     c1 = clamp(c1, 1, COLS.length - 1);
+    c2 = clamp(c2, 1, COLS.length - 1);
   }
-  return { screen, startRow: r0, startCol: c0, endRow: r1, endCol: c1 };
+  return { screen, r1, c1, r2, c2 };
 }
 
 function refreshRangeGridRenders() {
@@ -1460,9 +1461,9 @@ function gridCellHitFromClient(screen, clientX, clientY) {
 
 function buildRangeClipboard(rng) {
   const rows = [];
-  for (let r = rng.startRow; r <= rng.endRow; r++) {
+  for (let r = rng.r1; r <= rng.r2; r++) {
     const row = [];
-    for (let c = rng.startCol; c <= rng.endCol; c++) {
+    for (let c = rng.c1; c <= rng.c2; c++) {
       row.push(readCellValueAt(rng.screen, r, c));
     }
     rows.push(row);
@@ -1470,63 +1471,67 @@ function buildRangeClipboard(rng) {
   return {
     kind: "range",
     screen: rng.screen,
-    w: rng.endCol - rng.startCol + 1,
-    h: rng.endRow - rng.startRow + 1,
+    w: rng.c2 - rng.c1 + 1,
+    h: rng.r2 - rng.r1 + 1,
     rows,
   };
 }
 
-function pasteRangeGrid(clip, targetRng) {
-  if (!clip || clip.kind !== "range" || !targetRng) return false;
-  if (clip.screen !== targetRng.screen) {
+/** Paste a copied block with top-left at the current single-selected edit cell (clipped to grid). */
+function pasteRangeAtCursor(clip) {
+  if (!clip || clip.kind !== "range") return false;
+  if (clip.screen !== activeScreen) {
     setStatus("Paste blocked (screen mismatch).");
     return false;
   }
-  if (clip.w !== targetRng.endCol - targetRng.startCol + 1 || clip.h !== targetRng.endRow - targetRng.startRow + 1) {
-    setStatus("Paste blocked (range size mismatch).");
+  let r0;
+  let c0;
+  if (activeScreen === "P") {
+    r0 = selRow;
+    c0 = selCol;
+    if (c0 < 1) {
+      setStatus("Select an edit cell to paste.");
+      return false;
+    }
+  } else if (activeScreen === "S") {
+    r0 = songSelRow;
+    c0 = songSelCol;
+  } else if (activeScreen === "C") {
+    r0 = chainSelRow;
+    c0 = chainSelCol;
+  } else {
     return false;
   }
+
+  let n = 0;
   for (let i = 0; i < clip.h; i++) {
     for (let j = 0; j < clip.w; j++) {
+      const r = r0 + i;
+      const c = c0 + j;
+      if (r < 0 || r > ROWS - 1) continue;
+      if (clip.screen === "P" && (c < 1 || c > COLS.length - 1)) continue;
+      if (clip.screen === "S" && (c < 0 || c > SONG_COLS.length - 1)) continue;
+      if (clip.screen === "C" && (c < 0 || c > 1)) continue;
       const payload = clip.rows[i][j];
       if (!payload) continue;
-      const r = targetRng.startRow + i;
-      const c = targetRng.startCol + j;
-      writeCellValueAt(targetRng.screen, r, c, payload);
-    }
-  }
-  saveState();
-  refreshRangeGridRenders();
-  setStatusCursor();
-  setStatus("Pasted range.");
-  return true;
-}
-
-function pasteSingleIntoRange(clip, targetRng) {
-  if (!clip || clip.kind === "range" || !clip.type || !targetRng) return false;
-  let n = 0;
-  for (let r = targetRng.startRow; r <= targetRng.endRow; r++) {
-    for (let c = targetRng.startCol; c <= targetRng.endCol; c++) {
-      if (cellTypeForGrid(targetRng.screen, c) === clip.type) {
-        if (writeCellValueAt(targetRng.screen, r, c, clip)) n++;
-      }
+      if (writeCellValueAt(clip.screen, r, c, payload)) n++;
     }
   }
   if (!n) {
-    setStatus("Paste blocked (no matching cells in range).");
+    setStatus("Paste blocked (block does not fit here).");
     return false;
   }
   saveState();
   refreshRangeGridRenders();
   setStatusCursor();
-  setStatus(`Pasted into ${n} cell(s).`);
+  setStatus("Pasted block.");
   return true;
 }
 
 function clearCellsInRange(rng) {
   if (!rng) return;
-  for (let r = rng.startRow; r <= rng.endRow; r++) {
-    for (let c = rng.startCol; c <= rng.endCol; c++) {
+  for (let r = rng.r1; r <= rng.r2; r++) {
+    for (let c = rng.c1; c <= rng.c2; c++) {
       clearCellAt(rng.screen, r, c);
     }
   }
@@ -1543,15 +1548,6 @@ function handleGridTouchStart(e) {
     e.currentTarget === elChainView ? "C" : null;
   if (!screen || screen !== activeScreen) return;
 
-  if (e.touches.length === 1) {
-    state.selectedRange = null;
-    const t = e.touches[0];
-    const hit = gridCellHitFromClient(screen, t.clientX, t.clientY);
-    state.selectionAnchor = hit ? { screen, row: hit.row, col: hit.col } : null;
-    refreshRangeGridRenders();
-    return;
-  }
-
   if (e.touches.length === 2) {
     e.preventDefault();
     const anchor = state.selectionAnchor;
@@ -1561,6 +1557,26 @@ function handleGridTouchStart(e) {
     if (!hit) return;
     state.selectedRange = normalizeSelectedRangeRect(screen, anchor.row, anchor.col, hit.row, hit.col);
     refreshRangeGridRenders();
+    return;
+  }
+
+  if (e.touches.length === 1) {
+    state.selectedRange = null;
+    const t = e.touches[0];
+    const hit = gridCellHitFromClient(screen, t.clientX, t.clientY);
+    state.selectionAnchor = hit ? { screen, row: hit.row, col: hit.col } : null;
+    refreshRangeGridRenders();
+  }
+}
+
+function handleGridTouchMove(e) {
+  const screen =
+    e.currentTarget === elTracker ? "P" :
+    e.currentTarget === elSongView ? "S" :
+    e.currentTarget === elChainView ? "C" : null;
+  if (!screen || screen !== activeScreen) return;
+  if (e.touches.length >= 2) {
+    e.preventDefault();
   }
 }
 
@@ -2733,21 +2749,11 @@ function initUI() {
       return;
     }
     if (action === "paste") {
-      if (hasRange) {
-        if (cellClipboard?.kind === "range") {
-          pasteRangeGrid(cellClipboard, state.selectedRange);
-        } else if (cellClipboard?.type) {
-          pasteSingleIntoRange(cellClipboard, state.selectedRange);
-        } else {
-          setStatus("Nothing to paste.");
-        }
+      if (cellClipboard?.kind === "range") {
+        pasteRangeAtCursor(cellClipboard);
         return;
       }
       if (!current?.type) return;
-      if (cellClipboard?.kind === "range") {
-        setStatus("Select a range to paste.");
-        return;
-      }
       if (cellClipboard?.type && cellClipboard.type === current.type) {
         writeCurrentCellValue(cellClipboard);
       } else {
@@ -2839,6 +2845,9 @@ function initUI() {
   elTracker?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
   elSongView?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
   elChainView?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
+  elTracker?.addEventListener("touchmove", handleGridTouchMove, { passive: false });
+  elSongView?.addEventListener("touchmove", handleGridTouchMove, { passive: false });
+  elChainView?.addEventListener("touchmove", handleGridTouchMove, { passive: false });
 
   function pointerDownSelectList(e, expectedScreen) {
     if (activeScreen !== expectedScreen) return;
