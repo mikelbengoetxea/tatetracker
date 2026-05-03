@@ -183,6 +183,8 @@ function defaultState() {
     phrases: {
       0x00: phrase00,
     },
+    selectionAnchor: null,
+    selectedRange: null,
   };
 }
 
@@ -272,7 +274,10 @@ function loadState() {
 }
 
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  const persisted = { ...state };
+  delete persisted.selectionAnchor;
+  delete persisted.selectedRange;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 }
 
 let state = loadState();
@@ -593,6 +598,7 @@ function renderTracker({ force = false } = {}) {
       if (COLS[c].key !== "row") cell.classList.add("editcell");
 
       cell.textContent = values[c];
+      if (cellInSelectedRange("P", r, c)) cell.classList.add("cell--range-highlight");
       row.appendChild(cell);
     }
 
@@ -641,6 +647,7 @@ function renderSongView({ force = false } = {}) {
       cell.dataset.row = String(r);
       cell.dataset.col = String(c);
       if (r === songSelRow && c === songSelCol) cell.classList.add("list16__cell--selected");
+      if (cellInSelectedRange("S", r, c)) cell.classList.add("list16__cell--range-highlight");
       row.appendChild(cell);
     }
     list.appendChild(row);
@@ -685,6 +692,7 @@ function renderChainView({ force = false } = {}) {
     cP.dataset.row = String(r);
     cP.dataset.col = "0";
     if (r === chainSelRow && chainSelCol === 0) cP.classList.add("list16__cell--selected");
+    if (cellInSelectedRange("C", r, 0)) cP.classList.add("list16__cell--range-highlight");
 
     const cT = document.createElement("div");
     cT.className = "list16__cell editcell";
@@ -693,6 +701,7 @@ function renderChainView({ force = false } = {}) {
     cT.dataset.row = String(r);
     cT.dataset.col = "1";
     if (r === chainSelRow && chainSelCol === 1) cT.classList.add("list16__cell--selected");
+    if (cellInSelectedRange("C", r, 1)) cT.classList.add("list16__cell--range-highlight");
 
     row.appendChild(c0);
     row.appendChild(cP);
@@ -706,6 +715,8 @@ function renderChainView({ force = false } = {}) {
 function setActiveScreen(next) {
   if (!next || !SCREEN_NAMES[next] || next === activeScreen) return;
   activeScreen = next;
+  state.selectionAnchor = null;
+  state.selectedRange = null;
   resetGhostSelect();
 
   if (elPhraseView) elPhraseView.classList.toggle("screen--active", activeScreen === "P");
@@ -1235,46 +1246,328 @@ function immediateCenterPanForStep(step) {
   if (panner?.pan?.value != null) panner.pan.value = 0;
 }
 
-function currentCellType() {
-  if (activeScreen === "S") return `song.chainId`;
-  if (activeScreen === "C") return chainSelCol === 0 ? `chain.phraseId` : `chain.tsp`;
-  if (activeScreen === "P") {
-    const key = COLS[selCol]?.key;
-    if (key === "note") return `phrase.note`;
-    if (key === "instr") return `phrase.instr`;
-    if (key === "cmd") return `phrase.cmd`;
-    if (key === "val") return `phrase.val`;
+function cellTypeForGrid(screen, col) {
+  if (screen === "S") return "song.chainId";
+  if (screen === "C") return col === 0 ? "chain.phraseId" : "chain.tsp";
+  if (screen === "P") {
+    const key = COLS[col]?.key;
+    if (key === "note") return "phrase.note";
+    if (key === "instr") return "phrase.instr";
+    if (key === "cmd") return "phrase.cmd";
+    if (key === "val") return "phrase.val";
   }
   return null;
 }
 
-function readCurrentCellValue() {
-  const type = currentCellType();
+function currentCellType() {
+  if (activeScreen === "S") return cellTypeForGrid("S", songSelCol);
+  if (activeScreen === "C") return cellTypeForGrid("C", chainSelCol);
+  if (activeScreen === "P") return cellTypeForGrid("P", selCol);
+  return null;
+}
+
+function readCellValueAt(screen, r, c) {
+  const type = cellTypeForGrid(screen, c);
   if (!type) return null;
+  const row = clamp(r | 0, 0, ROWS - 1);
 
   if (type === "song.chainId") {
-    const row = state.song?.[songSelRow];
-    const cur = Array.isArray(row) ? row[songSelCol] : (songSelCol === 0 ? row : null);
+    const cc = clamp(c | 0, 0, SONG_COLS.length - 1);
+    const songRow = state.song?.[row];
+    const cur = Array.isArray(songRow) ? songRow[cc] : (cc === 0 ? songRow : null);
     return { type, value: cur == null ? null : clampByte(cur) };
   }
   if (type === "chain.phraseId") {
     const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
-    state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
-    const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
+    state.chains[activeChainId] = chain.map((x) => normalizeChainRow(x));
+    const entry = normalizeChainRow(state.chains[activeChainId][row]);
     return { type, value: entry.phraseId == null ? null : clampByte(entry.phraseId) };
   }
   if (type === "chain.tsp") {
     const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
-    state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
-    const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
+    state.chains[activeChainId] = chain.map((x) => normalizeChainRow(x));
+    const entry = normalizeChainRow(state.chains[activeChainId][row]);
     return { type, value: semisFromTspByte(entry.tsp) };
   }
-  // Phrase
-  const step = currentPhrase().steps[selRow];
+  const step = currentPhrase().steps[row];
   if (type === "phrase.note") return { type, value: normalizeNote(step.note) || "" };
   if (type === "phrase.instr") return { type, value: normalizeInstr(step.instr) };
   if (type === "phrase.cmd") return { type, value: normalizeCmd(step.cmd) };
   if (type === "phrase.val") return { type, value: step.val == null ? null : clampByte(step.val) };
+  return null;
+}
+
+function writeCellValueAt(screen, r, c, payload) {
+  if (!payload?.type) return false;
+  const row = clamp(r | 0, 0, ROWS - 1);
+  const expected = cellTypeForGrid(screen, c);
+  if (payload.type !== expected) return false;
+
+  if (payload.type === "song.chainId") {
+    const cc = clamp(c | 0, 0, SONG_COLS.length - 1);
+    const next = payload.value == null ? null : clampByte(payload.value);
+    const songRow = state.song?.[row];
+    if (Array.isArray(songRow)) songRow[cc] = next;
+    else if (cc === 0) state.song[row] = next;
+    return true;
+  }
+  if (payload.type === "chain.phraseId") {
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((x) => normalizeChainRow(x));
+    const entry = normalizeChainRow(state.chains[activeChainId][row]);
+    entry.phraseId = payload.value == null ? null : clampByte(payload.value);
+    state.chains[activeChainId][row] = entry;
+    return true;
+  }
+  if (payload.type === "chain.tsp") {
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((x) => normalizeChainRow(x));
+    const entry = normalizeChainRow(state.chains[activeChainId][row]);
+    const semis = clamp((Number(payload.value) || 0) | 0, -12, 12);
+    entry.tsp = tspByteFromSemis(semis);
+    state.chains[activeChainId][row] = entry;
+    return true;
+  }
+  const step = currentPhrase().steps[row];
+  if (payload.type === "phrase.note") {
+    step.note = normalizeNote(String(payload.value ?? "")) || "";
+    return true;
+  }
+  if (payload.type === "phrase.instr") {
+    step.instr = normalizeInstr(payload.value == null ? 0 : payload.value);
+    return true;
+  }
+  if (payload.type === "phrase.cmd") {
+    const prev = normalizeCmd(step.cmd);
+    const next = normalizeCmd(payload.value);
+    step.cmd = next;
+    ensureValSemantics(step);
+    if (prev === "O" && next !== "O") immediateCenterPanForStep(step);
+    return true;
+  }
+  if (payload.type === "phrase.val") {
+    step.val = payload.value == null ? null : clampByte(payload.value);
+    ensureValSemantics(step);
+    return true;
+  }
+  return false;
+}
+
+function clearCellAt(screen, r, c) {
+  const row = clamp(r | 0, 0, ROWS - 1);
+  if (screen === "S") {
+    const cc = clamp(c | 0, 0, SONG_COLS.length - 1);
+    const songRow = state.song?.[row];
+    if (Array.isArray(songRow)) songRow[cc] = null;
+    else if (cc === 0) state.song[row] = null;
+    return;
+  }
+  if (screen === "C") {
+    const cc = clamp(c | 0, 0, 1);
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((x) => normalizeChainRow(x));
+    const entry = normalizeChainRow(state.chains[activeChainId][row]);
+    if (cc === 0) entry.phraseId = null;
+    if (cc === 1) entry.tsp = 0x00;
+    state.chains[activeChainId][row] = entry;
+    return;
+  }
+  if (screen === "P") {
+    const cc = clamp(c | 0, 1, COLS.length - 1);
+    const step = currentPhrase().steps[row];
+    const key = COLS[cc].key;
+    if (key === "note") step.note = "";
+    if (key === "instr") step.instr = 0x00;
+    if (key === "cmd") {
+      step.cmd = null;
+      step.val = null;
+    }
+    if (key === "val") step.val = normalizeCmd(step.cmd) ? 0x00 : null;
+    step.instr = normalizeInstr(step.instr);
+    ensureValSemantics(step);
+  }
+}
+
+function cellInSelectedRange(screen, r, c) {
+  const rng = state.selectedRange;
+  if (!rng || rng.screen !== screen) return false;
+  return r >= rng.startRow && r <= rng.endRow && c >= rng.startCol && c <= rng.endCol;
+}
+
+function normalizeSelectedRangeRect(screen, ar, ac, br, bc) {
+  let r0 = Math.min(ar, br);
+  let r1 = Math.max(ar, br);
+  let c0 = Math.min(ac, bc);
+  let c1 = Math.max(ac, bc);
+  r0 = clamp(r0, 0, ROWS - 1);
+  r1 = clamp(r1, 0, ROWS - 1);
+  if (screen === "S") {
+    c0 = clamp(c0, 0, SONG_COLS.length - 1);
+    c1 = clamp(c1, 0, SONG_COLS.length - 1);
+  } else if (screen === "C") {
+    c0 = clamp(c0, 0, 1);
+    c1 = clamp(c1, 0, 1);
+  } else if (screen === "P") {
+    c0 = clamp(c0, 1, COLS.length - 1);
+    c1 = clamp(c1, 1, COLS.length - 1);
+  }
+  return { screen, startRow: r0, startCol: c0, endRow: r1, endCol: c1 };
+}
+
+function refreshRangeGridRenders() {
+  if (activeScreen === "P") renderTracker({ force: true });
+  else if (activeScreen === "S") renderSongView({ force: true });
+  else if (activeScreen === "C") renderChainView({ force: true });
+}
+
+function clearTransientGridSelection() {
+  state.selectedRange = null;
+  state.selectionAnchor = null;
+  refreshRangeGridRenders();
+}
+
+function gridCellHitFromClient(screen, clientX, clientY) {
+  const el = document.elementFromPoint(clientX, clientY);
+  if (!(el instanceof HTMLElement)) return null;
+  if (screen === "P") {
+    const cell = el.classList.contains("cell") ? el : el.closest(".cell");
+    if (!cell || !cell.classList.contains("editcell")) return null;
+    const r = Number(cell.dataset.row);
+    const c = Number(cell.dataset.col);
+    if (!Number.isFinite(r) || !Number.isFinite(c) || c === 0) return null;
+    return { row: r, col: c };
+  }
+  if (screen === "S") {
+    const cell = el.classList.contains("list16__cell") ? el : el.closest(".list16__cell");
+    if (!cell || !cell.classList.contains("editcell")) return null;
+    if (cell.dataset.screen !== "S") return null;
+    const r = Number(cell.dataset.row);
+    const c = Number(cell.dataset.col);
+    if (!Number.isFinite(r) || !Number.isFinite(c)) return null;
+    return { row: r, col: c };
+  }
+  if (screen === "C") {
+    const cell = el.classList.contains("list16__cell") ? el : el.closest(".list16__cell");
+    if (!cell || !cell.classList.contains("editcell")) return null;
+    if (cell.dataset.screen !== "C") return null;
+    const r = Number(cell.dataset.row);
+    const c = Number(cell.dataset.col);
+    if (!Number.isFinite(r) || !Number.isFinite(c)) return null;
+    return { row: r, col: c };
+  }
+  return null;
+}
+
+function buildRangeClipboard(rng) {
+  const rows = [];
+  for (let r = rng.startRow; r <= rng.endRow; r++) {
+    const row = [];
+    for (let c = rng.startCol; c <= rng.endCol; c++) {
+      row.push(readCellValueAt(rng.screen, r, c));
+    }
+    rows.push(row);
+  }
+  return {
+    kind: "range",
+    screen: rng.screen,
+    w: rng.endCol - rng.startCol + 1,
+    h: rng.endRow - rng.startRow + 1,
+    rows,
+  };
+}
+
+function pasteRangeGrid(clip, targetRng) {
+  if (!clip || clip.kind !== "range" || !targetRng) return false;
+  if (clip.screen !== targetRng.screen) {
+    setStatus("Paste blocked (screen mismatch).");
+    return false;
+  }
+  if (clip.w !== targetRng.endCol - targetRng.startCol + 1 || clip.h !== targetRng.endRow - targetRng.startRow + 1) {
+    setStatus("Paste blocked (range size mismatch).");
+    return false;
+  }
+  for (let i = 0; i < clip.h; i++) {
+    for (let j = 0; j < clip.w; j++) {
+      const payload = clip.rows[i][j];
+      if (!payload) continue;
+      const r = targetRng.startRow + i;
+      const c = targetRng.startCol + j;
+      writeCellValueAt(targetRng.screen, r, c, payload);
+    }
+  }
+  saveState();
+  refreshRangeGridRenders();
+  setStatusCursor();
+  setStatus("Pasted range.");
+  return true;
+}
+
+function pasteSingleIntoRange(clip, targetRng) {
+  if (!clip || clip.kind === "range" || !clip.type || !targetRng) return false;
+  let n = 0;
+  for (let r = targetRng.startRow; r <= targetRng.endRow; r++) {
+    for (let c = targetRng.startCol; c <= targetRng.endCol; c++) {
+      if (cellTypeForGrid(targetRng.screen, c) === clip.type) {
+        if (writeCellValueAt(targetRng.screen, r, c, clip)) n++;
+      }
+    }
+  }
+  if (!n) {
+    setStatus("Paste blocked (no matching cells in range).");
+    return false;
+  }
+  saveState();
+  refreshRangeGridRenders();
+  setStatusCursor();
+  setStatus(`Pasted into ${n} cell(s).`);
+  return true;
+}
+
+function clearCellsInRange(rng) {
+  if (!rng) return;
+  for (let r = rng.startRow; r <= rng.endRow; r++) {
+    for (let c = rng.startCol; c <= rng.endCol; c++) {
+      clearCellAt(rng.screen, r, c);
+    }
+  }
+  saveState();
+  refreshRangeGridRenders();
+  setStatusCursor();
+  setStatus("Cleared range.");
+}
+
+function handleGridTouchStart(e) {
+  const screen =
+    e.currentTarget === elTracker ? "P" :
+    e.currentTarget === elSongView ? "S" :
+    e.currentTarget === elChainView ? "C" : null;
+  if (!screen || screen !== activeScreen) return;
+
+  if (e.touches.length === 1) {
+    state.selectedRange = null;
+    const t = e.touches[0];
+    const hit = gridCellHitFromClient(screen, t.clientX, t.clientY);
+    state.selectionAnchor = hit ? { screen, row: hit.row, col: hit.col } : null;
+    refreshRangeGridRenders();
+    return;
+  }
+
+  if (e.touches.length === 2) {
+    e.preventDefault();
+    const anchor = state.selectionAnchor;
+    if (!anchor || anchor.screen !== screen) return;
+    const newTouch = e.changedTouches[0];
+    const hit = gridCellHitFromClient(screen, newTouch.clientX, newTouch.clientY);
+    if (!hit) return;
+    state.selectedRange = normalizeSelectedRangeRect(screen, anchor.row, anchor.col, hit.row, hit.col);
+    refreshRangeGridRenders();
+  }
+}
+
+function readCurrentCellValue() {
+  if (activeScreen === "S") return readCellValueAt("S", songSelRow, songSelCol);
+  if (activeScreen === "C") return readCellValueAt("C", chainSelRow, chainSelCol);
+  if (activeScreen === "P") return readCellValueAt("P", selRow, selCol);
   return null;
 }
 
@@ -2426,14 +2719,35 @@ function initUI() {
     resetGhostSelect();
 
     const current = readCurrentCellValue();
-    if (!current?.type) return;
+    const hasRange = state.selectedRange && state.selectedRange.screen === activeScreen;
 
     if (action === "copy") {
-      cellClipboard = current;
-      setStatus(`Copied ${cellClipboard?.type ?? "--"}.`);
+      if (hasRange) {
+        cellClipboard = buildRangeClipboard(state.selectedRange);
+        setStatus("Copied range.");
+      } else {
+        if (!current?.type) return;
+        cellClipboard = current;
+        setStatus(`Copied ${cellClipboard?.type ?? "--"}.`);
+      }
       return;
     }
     if (action === "paste") {
+      if (hasRange) {
+        if (cellClipboard?.kind === "range") {
+          pasteRangeGrid(cellClipboard, state.selectedRange);
+        } else if (cellClipboard?.type) {
+          pasteSingleIntoRange(cellClipboard, state.selectedRange);
+        } else {
+          setStatus("Nothing to paste.");
+        }
+        return;
+      }
+      if (!current?.type) return;
+      if (cellClipboard?.kind === "range") {
+        setStatus("Select a range to paste.");
+        return;
+      }
       if (cellClipboard?.type && cellClipboard.type === current.type) {
         writeCurrentCellValue(cellClipboard);
       } else {
@@ -2442,7 +2756,8 @@ function initUI() {
       return;
     }
     if (action === "delete") {
-      clearCurrentCell();
+      if (hasRange) clearCellsInRange(state.selectedRange);
+      else clearCurrentCell();
     }
   });
 
@@ -2493,12 +2808,17 @@ function initUI() {
       const hit = el.closest(".cell.editcell, .list16__cell.editcell");
       if (hit) return;
     }
+    clearTransientGridSelection();
     resetGhostSelect();
   }, { capture: true });
 
   // Phrase cell: first tap selects and parks ghost <select> over the cell; second tap hits the select.
   elTracker.addEventListener("pointerdown", (e) => {
     if (activeScreen !== "P") return;
+    if (e.pointerType === "touch" && e.isPrimary === false) {
+      e.preventDefault();
+      return;
+    }
     const target = e.target;
     if (!(target instanceof HTMLElement)) return;
     const cell = target.classList.contains("cell") ? target : target.closest(".cell");
@@ -2509,14 +2829,23 @@ function initUI() {
     if (c === 0) return; // Row index column
     e.preventDefault();
 
+    state.selectedRange = null;
     selRow = clamp(r, 0, ROWS - 1);
     selCol = clamp(c, 0, COLS.length - 1);
-    applySelectionUI();
+    renderTracker({ force: true });
     focusMain();
   });
 
+  elTracker?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
+  elSongView?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
+  elChainView?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
+
   function pointerDownSelectList(e, expectedScreen) {
     if (activeScreen !== expectedScreen) return;
+    if (e.pointerType === "touch" && e.isPrimary === false) {
+      e.preventDefault();
+      return;
+    }
     const target = e.target;
     if (!(target instanceof HTMLElement)) return;
     const listCell = target.classList.contains("list16__cell") ? target : target.closest(".list16__cell");
@@ -2527,6 +2856,8 @@ function initUI() {
     const c = Number(listCell.dataset.col);
     if (!Number.isFinite(r) || !Number.isFinite(c)) return;
     e.preventDefault();
+
+    state.selectedRange = null;
 
     if (expectedScreen === "S") {
       songSelRow = clamp(r, 0, ROWS - 1);
