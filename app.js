@@ -341,6 +341,22 @@ const elMixVol2Val = document.getElementById("mixVol2Val");
 const elMixVol3Val = document.getElementById("mixVol3Val");
 const elNudgeBar = document.querySelector(".nudge-bar");
 const elCellMenuSelect = document.getElementById("cellMenuSelect");
+const elTouchDebugHud = document.getElementById("touchDebugHud");
+
+/** TEMP: live finger count from last document-level touch event (for debug HUD). */
+let debugLiveTouchCount = 0;
+
+function updateTouchDebugHud() {
+  if (!elTouchDebugHud) return;
+  const anchor = state.selectionAnchor;
+  const rng = state.selectedRange;
+  const anchorStr = anchor == null ? "null" : `${anchor.screen} r${anchor.row} c${anchor.col}`;
+  const rangeStr = rng == null ? "null" : JSON.stringify(rng);
+  elTouchDebugHud.textContent =
+    `touches (document): ${debugLiveTouchCount}\n` +
+    `selectionAnchor: ${anchorStr}\n` +
+    `selectedRange: ${rangeStr}`;
+}
 
 // Audio
 let engineReady = false;
@@ -717,6 +733,7 @@ function setActiveScreen(next) {
   activeScreen = next;
   state.selectionAnchor = null;
   state.selectedRange = null;
+  updateTouchDebugHud();
   resetGhostSelect();
 
   if (elPhraseView) elPhraseView.classList.toggle("screen--active", activeScreen === "P");
@@ -1425,6 +1442,7 @@ function clearTransientGridSelection() {
   state.selectedRange = null;
   state.selectionAnchor = null;
   refreshRangeGridRenders();
+  updateTouchDebugHud();
 }
 
 function gridCellHitFromClient(screen, clientX, clientY) {
@@ -1550,13 +1568,30 @@ function handleGridTouchStart(e) {
 
   if (e.touches.length === 2) {
     e.preventDefault();
-    const anchor = state.selectionAnchor;
-    if (!anchor || anchor.screen !== screen) return;
-    const newTouch = e.changedTouches[0];
-    const hit = gridCellHitFromClient(screen, newTouch.clientX, newTouch.clientY);
-    if (!hit) return;
-    state.selectedRange = normalizeSelectedRangeRect(screen, anchor.row, anchor.col, hit.row, hit.col);
+    e.stopPropagation();
+
+    let anchor = state.selectionAnchor;
+    if (!anchor || anchor.screen !== screen) {
+      const t0 = e.touches[0];
+      const hit0 = gridCellHitFromClient(screen, t0.clientX, t0.clientY);
+      if (!hit0) {
+        updateTouchDebugHud();
+        return;
+      }
+      anchor = { screen, row: hit0.row, col: hit0.col };
+      state.selectionAnchor = anchor;
+    }
+
+    const t1 = e.touches[1];
+    const hit1 = gridCellHitFromClient(screen, t1.clientX, t1.clientY);
+    if (!hit1) {
+      updateTouchDebugHud();
+      return;
+    }
+
+    state.selectedRange = normalizeSelectedRangeRect(screen, anchor.row, anchor.col, hit1.row, hit1.col);
     refreshRangeGridRenders();
+    updateTouchDebugHud();
     return;
   }
 
@@ -1566,6 +1601,7 @@ function handleGridTouchStart(e) {
     const hit = gridCellHitFromClient(screen, t.clientX, t.clientY);
     state.selectionAnchor = hit ? { screen, row: hit.row, col: hit.col } : null;
     refreshRangeGridRenders();
+    updateTouchDebugHud();
   }
 }
 
@@ -2611,6 +2647,14 @@ function resetProject() {
 }
 
 function initUI() {
+  function syncDocumentTouchCount(ev) {
+    debugLiveTouchCount = ev.touches.length;
+    updateTouchDebugHud();
+  }
+  document.addEventListener("touchstart", syncDocumentTouchCount, { capture: true, passive: true });
+  document.addEventListener("touchend", syncDocumentTouchCount, { capture: true, passive: true });
+  document.addEventListener("touchcancel", syncDocumentTouchCount, { capture: true, passive: true });
+
   syncSettingsFormFromState();
   elPulse1Width.value = String(state.pulse1Width);
   elPulse2Width.value = String(state.pulse2Width);
@@ -3041,6 +3085,8 @@ function initUI() {
   window.addEventListener("resize", scheduleGhostSync, { passive: true });
   window.visualViewport?.addEventListener("resize", scheduleGhostSync, { passive: true });
   window.visualViewport?.addEventListener("scroll", scheduleGhostSync, { passive: true });
+
+  updateTouchDebugHud();
 }
 
 renderTracker();
