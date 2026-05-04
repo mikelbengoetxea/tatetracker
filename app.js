@@ -341,22 +341,6 @@ const elMixVol2Val = document.getElementById("mixVol2Val");
 const elMixVol3Val = document.getElementById("mixVol3Val");
 const elNudgeBar = document.querySelector(".nudge-bar");
 const elCellMenuSelect = document.getElementById("cellMenuSelect");
-const elTouchDebugHud = document.getElementById("touchDebugHud");
-
-/** TEMP: live finger count from last document-level touch event (for debug HUD). */
-let debugLiveTouchCount = 0;
-
-function updateTouchDebugHud() {
-  if (!elTouchDebugHud) return;
-  const anchor = state.selectionAnchor;
-  const rng = state.selectedRange;
-  const anchorStr = anchor == null ? "null" : `${anchor.screen} r${anchor.row} c${anchor.col}`;
-  const rangeStr = rng == null ? "null" : JSON.stringify(rng);
-  elTouchDebugHud.textContent =
-    `touches (document): ${debugLiveTouchCount}\n` +
-    `selectionAnchor: ${anchorStr}\n` +
-    `selectedRange: ${rangeStr}`;
-}
 
 // Audio
 let engineReady = false;
@@ -733,7 +717,6 @@ function setActiveScreen(next) {
   activeScreen = next;
   state.selectionAnchor = null;
   state.selectedRange = null;
-  updateTouchDebugHud();
   resetGhostSelect();
 
   if (elPhraseView) elPhraseView.classList.toggle("screen--active", activeScreen === "P");
@@ -787,7 +770,16 @@ function renderInstrumentView() {
   setStatusCursor();
 }
 
+function rangeSelectionBlocksDrill() {
+  const rng = state.selectedRange;
+  return Boolean(rng && rng.screen === activeScreen && (activeScreen === "S" || activeScreen === "C"));
+}
+
 function drillDown() {
+  if (rangeSelectionBlocksDrill()) {
+    setStatus("Clear selection to open Chain or Phrase.");
+    return true;
+  }
   if (activeScreen === "S") {
     const row = state.song?.[songSelRow];
     const cid = Array.isArray(row) ? row[songSelCol] : (songSelCol === 0 ? row : null);
@@ -855,6 +847,10 @@ function handleNavClick(targetScreen) {
   }
   if (targetScreen === "C") {
     if (activeScreen === "S") {
+      if (state.selectedRange?.screen === "S") {
+        setStatus("Clear selection to open Chain.");
+        return;
+      }
       const cid = getSelectedChainIdFromSong();
       if (cid != null) {
         activeChainId = cid;
@@ -868,6 +864,10 @@ function handleNavClick(targetScreen) {
   }
   if (targetScreen === "P") {
     if (activeScreen === "C") {
+      if (state.selectedRange?.screen === "C") {
+        setStatus("Clear selection to open Phrase.");
+        return;
+      }
       const pid = getSelectedPhraseIdFromChain();
       if (pid != null) {
         activePhraseId = pid;
@@ -1039,9 +1039,134 @@ function clampByte(v) {
   return clamp((Number(v) || 0) | 0, 0, 255);
 }
 
-function nudgeSelectedCell({ delta, isRandom }) {
+function applyCmdDeltaToStep(step, deltaSign) {
+  const prev = normalizeCmd(step.cmd);
+  const idx = CMD_ORDER.indexOf(prev);
+  const at = idx >= 0 ? idx : 0;
+  const next = CMD_ORDER[(at + deltaSign + CMD_ORDER.length) % CMD_ORDER.length];
+  step.cmd = next;
+  ensureValSemantics(step);
+  if (engineReady && prev === "O" && next !== "O") immediateCenterPanForStep(step);
+}
+
+function nudgeBarSign(action) {
+  if (action === "inc" || action === "jump_inc") return 1;
+  if (action === "dec" || action === "jump_dec") return -1;
+  return 0;
+}
+
+function nudgeSongCellAt(r, c, action, isRandom) {
+  const rr = clamp(r, 0, ROWS - 1);
+  const cc = clamp(c, 0, SONG_COLS.length - 1);
+  const row = state.song?.[rr];
+  const cur = Array.isArray(row) ? row[cc] : (cc === 0 ? row : null);
+  const start = cur == null ? 0x00 : clampByte(cur);
+  const sign = nudgeBarSign(action);
+  const step = !isRandom && action.startsWith("jump") ? 16 : 1;
+  const next = isRandom ? randomInt(0, 255) : clampByte(start + sign * step);
+  if (Array.isArray(row)) row[cc] = next;
+  else if (cc === 0) state.song[rr] = next;
+}
+
+function nudgeChainCellAt(r, c, action, isRandom) {
+  const rr = clamp(r, 0, ROWS - 1);
+  const cc = clamp(c, 0, 1);
+  const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+  state.chains[activeChainId] = chain.map((row) => normalizeChainRow(row));
+  const entry = normalizeChainRow(state.chains[activeChainId][rr]);
+  const sign = nudgeBarSign(action);
+  const step = !isRandom && action.startsWith("jump") ? 16 : 1;
+  const delta = isRandom ? 0 : sign * step;
+
+  if (cc === 0) {
+    const start = entry.phraseId == null ? 0x00 : clampByte(entry.phraseId);
+    const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
+    entry.phraseId = next;
+    state.chains[activeChainId][rr] = entry;
+    return;
+  }
+
+  const startSemis = semisFromTspByte(entry.tsp);
+  const nextSemis = isRandom ? randomInt(-12, 12) : clamp(startSemis + delta, -12, 12);
+  entry.tsp = tspByteFromSemis(nextSemis);
+  state.chains[activeChainId][rr] = entry;
+}
+
+function nudgePhraseCellAt(r, c, action, isRandom) {
+  const rr = clamp(r, 0, ROWS - 1);
+  const cc = clamp(c, 1, COLS.length - 1);
+  const colKey = COLS[cc]?.key;
+  if (!colKey || colKey === "row") return;
+  const step = currentPhrase().steps[rr];
+  const sign = nudgeBarSign(action);
+  const isJump = action.startsWith("jump");
+
+  if (colKey === "note") {
+    const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
+    const startN = noteNumberFromParts(parsed);
+    const nextN = isRandom
+      ? noteNumberFromParts({ idx: randomInt(0, 11), octave: parsed.octave })
+      : startN + sign * (isJump ? 12 : 1);
+    step.note = makeNote(partsFromNoteNumber(nextN));
+    return;
+  }
+
+  if (colKey === "instr") {
+    const start = normalizeInstr(step.instr);
+    const next = isRandom ? randomInt(0, 3) : clamp(start + sign * (isJump ? 16 : 1), 0, 3);
+    step.instr = next;
+    return;
+  }
+
+  if (colKey === "cmd") {
+    if (isRandom) {
+      step.cmd = CMD_ORDER[randomInt(0, CMD_ORDER.length - 1)];
+      ensureValSemantics(step);
+      return;
+    }
+    applyCmdDeltaToStep(step, sign > 0 ? 1 : -1);
+    return;
+  }
+
+  if (colKey === "val") {
+    const start = step.val == null ? 0x00 : clampByte(step.val);
+    const next = isRandom ? randomInt(0, 255) : clampByte(start + sign * (isJump ? 16 : 1));
+    step.val = next;
+    ensureValSemantics(step);
+  }
+}
+
+function nudgeSelectedRange({ action, isRandom, rng }) {
+  const screen = rng.screen;
+  for (let r = rng.r1; r <= rng.r2; r++) {
+    for (let c = rng.c1; c <= rng.c2; c++) {
+      if (screen === "S") nudgeSongCellAt(r, c, action, isRandom);
+      else if (screen === "C") nudgeChainCellAt(r, c, action, isRandom);
+      else nudgePhraseCellAt(r, c, action, isRandom);
+    }
+  }
+  saveState();
+  refreshRangeGridRenders();
+  setStatusCursor();
+  setStatus("Nudged selection.");
+  return true;
+}
+
+function nudgeSelectedCell({ action, isRandom }) {
   // Only nudge in editable grid/list screens.
   if (activeScreen !== "P" && activeScreen !== "S" && activeScreen !== "C") return false;
+
+  const rng = state.selectedRange;
+  if (rng && rng.screen === activeScreen) {
+    return nudgeSelectedRange({ action, isRandom, rng });
+  }
+
+  const sign = nudgeBarSign(action);
+  const isJump = action.startsWith("jump");
+  const isNoteSelected = activeScreen === "P" && COLS[selCol]?.key === "note";
+  const delta =
+    isRandom ? 0 :
+    sign * (isNoteSelected ? (isJump ? 12 : 1) : (isJump ? 16 : 1));
 
   // Song view: chain id byte
   if (activeScreen === "S") {
@@ -1442,7 +1567,6 @@ function clearTransientGridSelection() {
   state.selectedRange = null;
   state.selectionAnchor = null;
   refreshRangeGridRenders();
-  updateTouchDebugHud();
 }
 
 function getGridTouchRoot(screen) {
@@ -1586,24 +1710,17 @@ function handleGridTouchStart(e) {
     if (!anchor || anchor.screen !== screen) {
       const t0 = e.touches[0];
       const hit0 = gridCellHitFromClient(screen, t0.clientX, t0.clientY);
-      if (!hit0) {
-        updateTouchDebugHud();
-        return;
-      }
+      if (!hit0) return;
       anchor = { screen, row: hit0.row, col: hit0.col };
       state.selectionAnchor = anchor;
     }
 
     const t1 = e.touches[1];
     const hit1 = gridCellHitFromClient(screen, t1.clientX, t1.clientY);
-    if (!hit1) {
-      updateTouchDebugHud();
-      return;
-    }
+    if (!hit1) return;
 
     state.selectedRange = normalizeSelectedRangeRect(screen, anchor.row, anchor.col, hit1.row, hit1.col);
     refreshRangeGridRenders();
-    updateTouchDebugHud();
     return;
   }
 
@@ -1611,10 +1728,7 @@ function handleGridTouchStart(e) {
     state.selectedRange = null;
     const t = e.touches[0];
     const hit = gridCellHitFromClient(screen, t.clientX, t.clientY);
-    if (!hit) {
-      updateTouchDebugHud();
-      return;
-    }
+    if (!hit) return;
     const prev = state.selectionAnchor;
     const sameCell =
       prev &&
@@ -1625,7 +1739,6 @@ function handleGridTouchStart(e) {
       state.selectionAnchor = { screen, row: hit.row, col: hit.col };
     }
     refreshRangeGridRenders();
-    updateTouchDebugHud();
   }
 }
 
@@ -2671,14 +2784,6 @@ function resetProject() {
 }
 
 function initUI() {
-  function syncDocumentTouchCount(ev) {
-    debugLiveTouchCount = ev.touches.length;
-    updateTouchDebugHud();
-  }
-  document.addEventListener("touchstart", syncDocumentTouchCount, { capture: true, passive: true });
-  document.addEventListener("touchend", syncDocumentTouchCount, { capture: true, passive: true });
-  document.addEventListener("touchcancel", syncDocumentTouchCount, { capture: true, passive: true });
-
   syncSettingsFormFromState();
   elPulse1Width.value = String(state.pulse1Width);
   elPulse2Width.value = String(state.pulse2Width);
@@ -2968,18 +3073,20 @@ function initUI() {
     if (!action) return;
 
     const isRandom = action === "random";
-    const isNoteSelected = activeScreen === "P" && COLS[selCol]?.key === "note";
-
-    const sign =
-      action === "inc" ? 1 :
-      action === "dec" ? -1 :
-      action === "jump_inc" ? 1 :
-      action === "jump_dec" ? -1 :
-      0;
-
-    const delta = isRandom ? 0 : sign * (isNoteSelected ? (action.startsWith("jump") ? 12 : 1) : (action.startsWith("jump") ? 16 : 1));
-    nudgeSelectedCell({ delta, isRandom });
+    nudgeSelectedCell({ action, isRandom });
   });
+
+  function onSongChainDrillDblClick(e) {
+    if (activeScreen !== "S" && activeScreen !== "C") return;
+    if (rangeSelectionBlocksDrill()) {
+      e.preventDefault();
+      setStatus("Clear selection to drill down.");
+      return;
+    }
+    drillDown();
+  }
+  elSongView?.addEventListener("dblclick", onSongChainDrillDblClick);
+  elChainView?.addEventListener("dblclick", onSongChainDrillDblClick);
 
   function handleKeyDown(e) {
     if (elSettingsOverlay && !elSettingsOverlay.hasAttribute("hidden")) {
@@ -2999,6 +3106,18 @@ function initUI() {
           e.preventDefault();
           hideImportOverlay();
         }
+        return;
+      }
+    }
+
+    if (e.key === "Enter") {
+      if (activeScreen === "S" || activeScreen === "C") {
+        e.preventDefault();
+        if (rangeSelectionBlocksDrill()) {
+          setStatus("Clear selection to drill down.");
+          return;
+        }
+        drillDown();
         return;
       }
     }
@@ -3112,8 +3231,6 @@ function initUI() {
   window.addEventListener("resize", scheduleGhostSync, { passive: true });
   window.visualViewport?.addEventListener("resize", scheduleGhostSync, { passive: true });
   window.visualViewport?.addEventListener("scroll", scheduleGhostSync, { passive: true });
-
-  updateTouchDebugHud();
 }
 
 renderTracker();
