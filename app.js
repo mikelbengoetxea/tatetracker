@@ -1445,33 +1445,43 @@ function clearTransientGridSelection() {
   updateTouchDebugHud();
 }
 
+function getGridTouchRoot(screen) {
+  if (screen === "P") return elTracker;
+  if (screen === "S") return elSongView?.querySelector(".list16") ?? null;
+  if (screen === "C") return elChainView?.querySelector(".list16") ?? null;
+  return null;
+}
+
+/**
+ * Map viewport coords to a grid edit cell using each cell's `getBoundingClientRect()`
+ * (accounts for scroll, headers, and transforms inside the grid container).
+ */
 function gridCellHitFromClient(screen, clientX, clientY) {
-  const el = document.elementFromPoint(clientX, clientY);
-  if (!(el instanceof HTMLElement)) return null;
+  const root = getGridTouchRoot(screen);
+  if (!(root instanceof HTMLElement)) return null;
+  const bounds = root.getBoundingClientRect();
+  if (clientX < bounds.left || clientX > bounds.right || clientY < bounds.top || clientY > bounds.bottom) {
+    return null;
+  }
+
+  let selector;
   if (screen === "P") {
-    const cell = el.classList.contains("cell") ? el : el.closest(".cell");
-    if (!cell || !cell.classList.contains("editcell")) return null;
-    const r = Number(cell.dataset.row);
-    const c = Number(cell.dataset.col);
-    if (!Number.isFinite(r) || !Number.isFinite(c) || c === 0) return null;
-    return { row: r, col: c };
+    selector = ".tracker-row .cell.editcell";
+  } else {
+    selector = ".list16__row:not(.list16__row--header) .list16__cell.editcell";
   }
-  if (screen === "S") {
-    const cell = el.classList.contains("list16__cell") ? el : el.closest(".list16__cell");
-    if (!cell || !cell.classList.contains("editcell")) return null;
-    if (cell.dataset.screen !== "S") return null;
+
+  const cells = root.querySelectorAll(selector);
+  for (const cell of cells) {
+    if (!(cell instanceof HTMLElement)) continue;
+    if (screen === "S" && cell.dataset.screen !== "S") continue;
+    if (screen === "C" && cell.dataset.screen !== "C") continue;
+    const rect = cell.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue;
     const r = Number(cell.dataset.row);
     const c = Number(cell.dataset.col);
-    if (!Number.isFinite(r) || !Number.isFinite(c)) return null;
-    return { row: r, col: c };
-  }
-  if (screen === "C") {
-    const cell = el.classList.contains("list16__cell") ? el : el.closest(".list16__cell");
-    if (!cell || !cell.classList.contains("editcell")) return null;
-    if (cell.dataset.screen !== "C") return null;
-    const r = Number(cell.dataset.row);
-    const c = Number(cell.dataset.col);
-    if (!Number.isFinite(r) || !Number.isFinite(c)) return null;
+    if (!Number.isFinite(r) || !Number.isFinite(c)) continue;
+    if (screen === "P" && c === 0) continue;
     return { row: r, col: c };
   }
   return null;
@@ -1560,16 +1570,18 @@ function clearCellsInRange(rng) {
 }
 
 function handleGridTouchStart(e) {
+  if (e.touches.length >= 2) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
   const screen =
     e.currentTarget === elTracker ? "P" :
     e.currentTarget === elSongView ? "S" :
     e.currentTarget === elChainView ? "C" : null;
   if (!screen || screen !== activeScreen) return;
 
-  if (e.touches.length === 2) {
-    e.preventDefault();
-    e.stopPropagation();
-
+  if (e.touches.length >= 2) {
     let anchor = state.selectionAnchor;
     if (!anchor || anchor.screen !== screen) {
       const t0 = e.touches[0];
@@ -1599,21 +1611,33 @@ function handleGridTouchStart(e) {
     state.selectedRange = null;
     const t = e.touches[0];
     const hit = gridCellHitFromClient(screen, t.clientX, t.clientY);
-    state.selectionAnchor = hit ? { screen, row: hit.row, col: hit.col } : null;
+    if (!hit) {
+      updateTouchDebugHud();
+      return;
+    }
+    const prev = state.selectionAnchor;
+    const sameCell =
+      prev &&
+      prev.screen === screen &&
+      prev.row === hit.row &&
+      prev.col === hit.col;
+    if (!sameCell) {
+      state.selectionAnchor = { screen, row: hit.row, col: hit.col };
+    }
     refreshRangeGridRenders();
     updateTouchDebugHud();
   }
 }
 
 function handleGridTouchMove(e) {
+  if (e.touches.length >= 2) {
+    e.preventDefault();
+  }
   const screen =
     e.currentTarget === elTracker ? "P" :
     e.currentTarget === elSongView ? "S" :
     e.currentTarget === elChainView ? "C" : null;
   if (!screen || screen !== activeScreen) return;
-  if (e.touches.length >= 2) {
-    e.preventDefault();
-  }
 }
 
 function readCurrentCellValue() {
@@ -2882,6 +2906,7 @@ function initUI() {
     state.selectedRange = null;
     selRow = clamp(r, 0, ROWS - 1);
     selCol = clamp(c, 0, COLS.length - 1);
+    state.selectionAnchor = { screen: "P", row: selRow, col: selCol };
     renderTracker({ force: true });
     focusMain();
   });
@@ -2915,6 +2940,7 @@ function initUI() {
     if (expectedScreen === "S") {
       songSelRow = clamp(r, 0, ROWS - 1);
       songSelCol = clamp(c, 0, SONG_COLS.length - 1);
+      state.selectionAnchor = { screen: "S", row: songSelRow, col: songSelCol };
       renderSongView({ force: true });
       setStatusCursor();
       return;
@@ -2922,6 +2948,7 @@ function initUI() {
 
     chainSelRow = clamp(r, 0, ROWS - 1);
     chainSelCol = clamp(c, 0, 1);
+    state.selectionAnchor = { screen: "C", row: chainSelRow, col: chainSelCol };
     renderChainView({ force: true });
     setStatusCursor();
   }
