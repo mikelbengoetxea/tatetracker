@@ -1055,84 +1055,94 @@ function nudgeBarSign(action) {
   return 0;
 }
 
-function nudgeSongCellAt(r, c, action, isRandom) {
-  const rr = clamp(r, 0, ROWS - 1);
-  const cc = clamp(c, 0, SONG_COLS.length - 1);
-  const row = state.song?.[rr];
-  const cur = Array.isArray(row) ? row[cc] : (cc === 0 ? row : null);
-  const start = cur == null ? 0x00 : clampByte(cur);
-  const sign = nudgeBarSign(action);
-  const step = !isRandom && action.startsWith("jump") ? 16 : 1;
-  const next = isRandom ? randomInt(0, 255) : clampByte(start + sign * step);
-  if (Array.isArray(row)) row[cc] = next;
-  else if (cc === 0) state.song[rr] = next;
-}
+/**
+ * Single nudge application for one cell. Buttons use data-nudge:
+ * `inc` / `dec` → ±1 semitone (note) or ±1 byte step (hex-ish columns);
+ * `jump_inc` / `jump_dec` → ±12 semitones (note) or ±16 (other numeric columns).
+ * `random` → randomize that cell’s field.
+ */
+function applyNudgeToCell(screen, row, col, action, isRandom) {
+  if (screen === "S") {
+    const rr = clamp(row, 0, ROWS - 1);
+    const cc = clamp(col, 0, SONG_COLS.length - 1);
+    const songRow = state.song?.[rr];
+    const cur = Array.isArray(songRow) ? songRow[cc] : (cc === 0 ? songRow : null);
+    const start = cur == null ? 0x00 : clampByte(cur);
+    const sign = nudgeBarSign(action);
+    const step = !isRandom && action.startsWith("jump") ? 16 : 1;
+    const next = isRandom ? randomInt(0, 255) : clampByte(start + sign * step);
+    if (Array.isArray(songRow)) songRow[cc] = next;
+    else if (cc === 0) state.song[rr] = next;
+    return;
+  }
 
-function nudgeChainCellAt(r, c, action, isRandom) {
-  const rr = clamp(r, 0, ROWS - 1);
-  const cc = clamp(c, 0, 1);
-  const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
-  state.chains[activeChainId] = chain.map((row) => normalizeChainRow(row));
-  const entry = normalizeChainRow(state.chains[activeChainId][rr]);
-  const sign = nudgeBarSign(action);
-  const step = !isRandom && action.startsWith("jump") ? 16 : 1;
-  const delta = isRandom ? 0 : sign * step;
+  if (screen === "C") {
+    const rr = clamp(row, 0, ROWS - 1);
+    const cc = clamp(col, 0, 1);
+    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
+    state.chains[activeChainId] = chain.map((row0) => normalizeChainRow(row0));
+    const entry = normalizeChainRow(state.chains[activeChainId][rr]);
+    const sign = nudgeBarSign(action);
+    const step = !isRandom && action.startsWith("jump") ? 16 : 1;
+    const delta = isRandom ? 0 : sign * step;
 
-  if (cc === 0) {
-    const start = entry.phraseId == null ? 0x00 : clampByte(entry.phraseId);
-    const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
-    entry.phraseId = next;
+    if (cc === 0) {
+      const start = entry.phraseId == null ? 0x00 : clampByte(entry.phraseId);
+      const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
+      entry.phraseId = next;
+      state.chains[activeChainId][rr] = entry;
+      return;
+    }
+
+    const startSemis = semisFromTspByte(entry.tsp);
+    const nextSemis = isRandom ? randomInt(-12, 12) : clamp(startSemis + delta, -12, 12);
+    entry.tsp = tspByteFromSemis(nextSemis);
     state.chains[activeChainId][rr] = entry;
     return;
   }
 
-  const startSemis = semisFromTspByte(entry.tsp);
-  const nextSemis = isRandom ? randomInt(-12, 12) : clamp(startSemis + delta, -12, 12);
-  entry.tsp = tspByteFromSemis(nextSemis);
-  state.chains[activeChainId][rr] = entry;
-}
+  if (screen === "P") {
+    const rr = clamp(row, 0, ROWS - 1);
+    const cc = clamp(col, 1, COLS.length - 1);
+    const colKey = COLS[cc]?.key;
+    if (!colKey || colKey === "row") return;
+    const step = currentPhrase().steps[rr];
+    const sign = nudgeBarSign(action);
+    const isJump = action.startsWith("jump");
 
-function nudgePhraseCellAt(r, c, action, isRandom) {
-  const rr = clamp(r, 0, ROWS - 1);
-  const cc = clamp(c, 1, COLS.length - 1);
-  const colKey = COLS[cc]?.key;
-  if (!colKey || colKey === "row") return;
-  const step = currentPhrase().steps[rr];
-  const sign = nudgeBarSign(action);
-  const isJump = action.startsWith("jump");
-
-  if (colKey === "note") {
-    const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
-    const startN = noteNumberFromParts(parsed);
-    const nextN = isRandom
-      ? noteNumberFromParts({ idx: randomInt(0, 11), octave: parsed.octave })
-      : startN + sign * (isJump ? 12 : 1);
-    step.note = makeNote(partsFromNoteNumber(nextN));
-    return;
-  }
-
-  if (colKey === "instr") {
-    const start = normalizeInstr(step.instr);
-    const next = isRandom ? randomInt(0, 3) : clamp(start + sign * (isJump ? 16 : 1), 0, 3);
-    step.instr = next;
-    return;
-  }
-
-  if (colKey === "cmd") {
-    if (isRandom) {
-      step.cmd = CMD_ORDER[randomInt(0, CMD_ORDER.length - 1)];
-      ensureValSemantics(step);
+    if (colKey === "note") {
+      const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
+      const startN = noteNumberFromParts(parsed);
+      const nextN = isRandom
+        ? noteNumberFromParts({ idx: randomInt(0, 11), octave: parsed.octave })
+        : startN + sign * (isJump ? 12 : 1);
+      step.note = makeNote(partsFromNoteNumber(nextN));
       return;
     }
-    applyCmdDeltaToStep(step, sign > 0 ? 1 : -1);
-    return;
-  }
 
-  if (colKey === "val") {
-    const start = step.val == null ? 0x00 : clampByte(step.val);
-    const next = isRandom ? randomInt(0, 255) : clampByte(start + sign * (isJump ? 16 : 1));
-    step.val = next;
-    ensureValSemantics(step);
+    if (colKey === "instr") {
+      const start = normalizeInstr(step.instr);
+      const next = isRandom ? randomInt(0, 3) : clamp(start + sign * (isJump ? 16 : 1), 0, 3);
+      step.instr = next;
+      return;
+    }
+
+    if (colKey === "cmd") {
+      if (isRandom) {
+        step.cmd = CMD_ORDER[randomInt(0, CMD_ORDER.length - 1)];
+        ensureValSemantics(step);
+        return;
+      }
+      applyCmdDeltaToStep(step, sign > 0 ? 1 : -1);
+      return;
+    }
+
+    if (colKey === "val") {
+      const start = step.val == null ? 0x00 : clampByte(step.val);
+      const next = isRandom ? randomInt(0, 255) : clampByte(start + sign * (isJump ? 16 : 1));
+      step.val = next;
+      ensureValSemantics(step);
+    }
   }
 }
 
@@ -1140,9 +1150,7 @@ function nudgeSelectedRange({ action, isRandom, rng }) {
   const screen = rng.screen;
   for (let r = rng.r1; r <= rng.r2; r++) {
     for (let c = rng.c1; c <= rng.c2; c++) {
-      if (screen === "S") nudgeSongCellAt(r, c, action, isRandom);
-      else if (screen === "C") nudgeChainCellAt(r, c, action, isRandom);
-      else nudgePhraseCellAt(r, c, action, isRandom);
+      applyNudgeToCell(screen, r, c, action, isRandom);
     }
   }
   saveState();
@@ -1153,126 +1161,36 @@ function nudgeSelectedRange({ action, isRandom, rng }) {
 }
 
 function nudgeSelectedCell({ action, isRandom }) {
-  // Only nudge in editable grid/list screens.
   if (activeScreen !== "P" && activeScreen !== "S" && activeScreen !== "C") return false;
 
-  const rng = state.selectedRange;
-  if (rng && rng.screen === activeScreen) {
-    return nudgeSelectedRange({ action, isRandom, rng });
+  if (state.selectedRange && state.selectedRange.screen === activeScreen) {
+    return nudgeSelectedRange({ action, isRandom, rng: state.selectedRange });
   }
 
-  const sign = nudgeBarSign(action);
-  const isJump = action.startsWith("jump");
-  const isNoteSelected = activeScreen === "P" && COLS[selCol]?.key === "note";
-  const delta =
-    isRandom ? 0 :
-    sign * (isNoteSelected ? (isJump ? 12 : 1) : (isJump ? 16 : 1));
-
-  // Song view: chain id byte
   if (activeScreen === "S") {
-    const r = clamp(songSelRow, 0, ROWS - 1);
-    const c = clamp(songSelCol, 0, SONG_COLS.length - 1);
-    const row = state.song?.[r];
-    const cur = Array.isArray(row) ? row[c] : (c === 0 ? row : null);
-    const start = cur == null ? 0x00 : clampByte(cur);
-    const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
-    if (Array.isArray(row)) row[c] = next;
-    else if (c === 0) state.song[r] = next;
+    applyNudgeToCell("S", songSelRow, songSelCol, action, isRandom);
     saveState();
     renderSongView({ force: true });
     setStatusCursor();
-    setStatus(`CHAIN: ${idHex(next)}`);
+    setStatus("Nudged.");
     return true;
   }
 
-  // Chain view: phrase id byte or tsp semis
   if (activeScreen === "C") {
-    const r = clamp(chainSelRow, 0, ROWS - 1);
-    const c = clamp(chainSelCol, 0, 1);
-    const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
-    state.chains[activeChainId] = chain.map((rr) => normalizeChainRow(rr));
-    const entry = normalizeChainRow(state.chains[activeChainId][r]);
-
-    if (c === 0) {
-      const start = entry.phraseId == null ? 0x00 : clampByte(entry.phraseId);
-      const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
-      entry.phraseId = next;
-      state.chains[activeChainId][r] = entry;
-      saveState();
-      renderChainView({ force: true });
-      setStatusCursor();
-      setStatus(`PHRASE: ${idHex(next)}`);
-      return true;
-    }
-
-    const startSemis = semisFromTspByte(entry.tsp);
-    const nextSemis = isRandom ? randomInt(-12, 12) : clamp(startSemis + delta, -12, 12);
-    entry.tsp = tspByteFromSemis(nextSemis);
-    state.chains[activeChainId][r] = entry;
+    applyNudgeToCell("C", chainSelRow, chainSelCol, action, isRandom);
     saveState();
     renderChainView({ force: true });
     setStatusCursor();
-    setStatus(`TSP: ${formatTsp(entry.tsp)}`);
+    setStatus("Nudged.");
     return true;
   }
 
-  // Phrase view: note/instr/cmd/val (row col 1..4)
-  const r = clamp(selRow, 0, ROWS - 1);
-  const c = clamp(selCol, 1, COLS.length - 1);
-  const colKey = COLS[c]?.key;
-  if (!colKey || colKey === "row") return false;
-  const step = currentPhrase().steps[r];
-
-  if (colKey === "note") {
-    const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
-    const startN = noteNumberFromParts(parsed);
-    const nextN = isRandom
-      ? noteNumberFromParts({ idx: randomInt(0, 11), octave: parsed.octave })
-      : startN + delta;
-    step.note = makeNote(partsFromNoteNumber(nextN));
-    saveState();
-    renderTracker({ force: true });
-    setStatus(`VALUE: ${step.note || "--"}`);
-    return true;
-  }
-
-  if (colKey === "instr") {
-    const start = normalizeInstr(step.instr);
-    const next = isRandom ? randomInt(0, 3) : clamp(start + delta, 0, 3);
-    step.instr = next;
-    saveState();
-    renderTracker({ force: true });
-    setStatus(`INSTR: ${displayInstr(next)}`);
-    return true;
-  }
-
-  if (colKey === "cmd") {
-    if (isRandom) {
-      const idx = randomInt(0, CMD_ORDER.length - 1);
-      step.cmd = CMD_ORDER[idx];
-      ensureValSemantics(step);
-      saveState();
-      renderTracker({ force: true });
-      setStatus(`CMD: ${step.cmd ?? "--"}`);
-      return true;
-    }
-    // Commands don't map cleanly to hex nibbles; treat +/-16 the same as +/-1.
-    applyCmdDelta(delta >= 0 ? 1 : -1);
-    return true;
-  }
-
-  if (colKey === "val") {
-    const start = step.val == null ? 0x00 : clampByte(step.val);
-    const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
-    step.val = next;
-    ensureValSemantics(step);
-    saveState();
-    renderTracker({ force: true });
-    setStatus(`VAL: ${displayValForStep(step)}`);
-    return true;
-  }
-
-  return false;
+  applyNudgeToCell("P", selRow, selCol, action, isRandom);
+  saveState();
+  renderTracker({ force: true });
+  setStatusCursor();
+  setStatus("Nudged.");
+  return true;
 }
 
 function applySongHexDelta(delta) {
@@ -3061,14 +2979,14 @@ function initUI() {
   elSongView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "S"));
   elChainView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "C"));
 
-  function handleNudgeBarEvent(e) {
+  function handleNudgeBarPointerDown(e) {
     const t = e.target;
     if (!(t instanceof HTMLElement)) return;
     const btn = t.closest(".nudge-bar__btn");
     if (!btn) return;
 
-    // Prevent text selection / long-press menus and remove click delay on mobile.
-    if (typeof e.preventDefault === "function") e.preventDefault();
+    e.preventDefault();
+    e.stopPropagation();
 
     const action = btn.getAttribute("data-nudge");
     if (!action) return;
@@ -3077,10 +2995,7 @@ function initUI() {
     nudgeSelectedCell({ action, isRandom });
   }
 
-  // Nudge bar: pointer events when available; touch/click as fallback (some iOS setups).
-  elNudgeBar?.addEventListener("pointerdown", handleNudgeBarEvent, { passive: false });
-  elNudgeBar?.addEventListener("touchstart", handleNudgeBarEvent, { passive: false });
-  elNudgeBar?.addEventListener("click", handleNudgeBarEvent);
+  elNudgeBar?.addEventListener("pointerdown", handleNudgeBarPointerDown, { passive: false });
 
   function onSongChainDrillDblClick(e) {
     if (activeScreen !== "S" && activeScreen !== "C") return;
