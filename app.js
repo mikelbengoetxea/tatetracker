@@ -1163,8 +1163,10 @@ function nudgeSelectedRange({ action, isRandom, rng }) {
 function nudgeSelectedCell({ action, isRandom }) {
   if (activeScreen !== "P" && activeScreen !== "S" && activeScreen !== "C") return false;
 
-  if (state.selectedRange && state.selectedRange.screen === activeScreen) {
-    return nudgeSelectedRange({ action, isRandom, rng: state.selectedRange });
+  const rng =
+    state.selectedRange && state.selectedRange.screen === activeScreen ? state.selectedRange : null;
+  if (rng) {
+    return nudgeSelectedRange({ action, isRandom, rng });
   }
 
   if (activeScreen === "S") {
@@ -2898,6 +2900,7 @@ function initUI() {
   window.addEventListener("pointerdown", (e) => {
     const t = e.target;
     if (!(t instanceof Node)) return;
+    if (elNudgeBar && elNudgeBar.contains(t)) return;
     if (elCellMenuSelect && elCellMenuSelect.contains(t)) return;
     const el = t instanceof HTMLElement ? t : null;
     if (el && isGhostableEditCellEl(el)) return;
@@ -2987,6 +2990,7 @@ function initUI() {
 
     e.preventDefault();
     e.stopPropagation();
+    e.stopImmediatePropagation();
 
     const action = btn.getAttribute("data-nudge");
     if (!action) return;
