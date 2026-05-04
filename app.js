@@ -1055,6 +1055,62 @@ function nudgeBarSign(action) {
   return 0;
 }
 
+/** Song / chain id slots: unset or classic “empty” byte. */
+function isEmptySongChainByte(v) {
+  return v == null || v === 0xff;
+}
+
+function getSongChainIdRaw(row, col) {
+  const rr = clamp(row, 0, ROWS - 1);
+  const cc = clamp(col, 0, SONG_COLS.length - 1);
+  const songRow = state.song?.[rr];
+  if (Array.isArray(songRow)) return songRow[cc];
+  if (cc === 0) return songRow ?? null;
+  return null;
+}
+
+function readNormalizedChainRow(row) {
+  const rr = clamp(row, 0, ROWS - 1);
+  return normalizeChainRow(state.chains?.[activeChainId]?.[rr]);
+}
+
+/**
+ * True when this grid cell should be treated like `--` for range Random (Phrase / Song / Chain).
+ * Chain TSP cells are “empty” when the row has no phrase id (nothing to transpose).
+ */
+function rangeRandomCellIsEmpty(screen, row, col) {
+  if (screen === "S") {
+    return isEmptySongChainByte(getSongChainIdRaw(row, col));
+  }
+  if (screen === "C") {
+    const entry = readNormalizedChainRow(row);
+    const cc = clamp(col, 0, 1);
+    if (cc === 0) return isEmptySongChainByte(entry.phraseId);
+    return isEmptySongChainByte(entry.phraseId);
+  }
+  if (screen === "P") {
+    const rr = clamp(row, 0, ROWS - 1);
+    const cc = clamp(col, 1, COLS.length - 1);
+    const colKey = COLS[cc]?.key;
+    const step = currentPhrase().steps[rr];
+    if (!colKey || colKey === "row") return true;
+    if (colKey === "note") return !normalizeNote(step.note);
+    if (colKey === "instr") return step.instr == null;
+    if (colKey === "cmd") return normalizeCmd(step.cmd) == null;
+    if (colKey === "val") return normalizeCmd(step.cmd) == null;
+  }
+  return true;
+}
+
+function rangeRandomSelectionHasContent(screen, rng) {
+  for (let r = rng.r1; r <= rng.r2; r++) {
+    for (let c = rng.c1; c <= rng.c2; c++) {
+      if (!rangeRandomCellIsEmpty(screen, r, c)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Single nudge application for one cell. Buttons use data-nudge:
  * `inc` / `dec` → ±1 semitone (note) or ±1 byte step (hex-ish columns);
@@ -1148,15 +1204,32 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
 
 function nudgeSelectedRange({ action, isRandom, rng }) {
   const screen = rng.screen;
-  for (let r = rng.r1; r <= rng.r2; r++) {
-    for (let c = rng.c1; c <= rng.c2; c++) {
-      applyNudgeToCell(screen, r, c, action, isRandom);
+  const isRangeRandom = isRandom && action === "random";
+
+  if (isRangeRandom) {
+    const hasContent = rangeRandomSelectionHasContent(screen, rng);
+    for (let r = rng.r1; r <= rng.r2; r++) {
+      for (let c = rng.c1; c <= rng.c2; c++) {
+        if (!hasContent) {
+          if (!(Math.random() < 0.5)) continue;
+          applyNudgeToCell(screen, r, c, action, true);
+        } else {
+          if (rangeRandomCellIsEmpty(screen, r, c)) continue;
+          applyNudgeToCell(screen, r, c, action, true);
+        }
+      }
+    }
+  } else {
+    for (let r = rng.r1; r <= rng.r2; r++) {
+      for (let c = rng.c1; c <= rng.c2; c++) {
+        applyNudgeToCell(screen, r, c, action, isRandom);
+      }
     }
   }
   saveState();
   refreshRangeGridRenders();
   setStatusCursor();
-  setStatus("Nudged selection.");
+  setStatus(isRangeRandom ? "Randomized selection." : "Nudged selection.");
   return true;
 }
 
