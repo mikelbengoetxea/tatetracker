@@ -3061,20 +3061,26 @@ function initUI() {
   elSongView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "S"));
   elChainView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "C"));
 
-  // Nudge bar (pointerdown for instant response)
-  elNudgeBar?.addEventListener("pointerdown", (e) => {
+  function handleNudgeBarEvent(e) {
     const t = e.target;
     if (!(t instanceof HTMLElement)) return;
     const btn = t.closest(".nudge-bar__btn");
     if (!btn) return;
-    e.preventDefault();
+
+    // Prevent text selection / long-press menus and remove click delay on mobile.
+    if (typeof e.preventDefault === "function") e.preventDefault();
 
     const action = btn.getAttribute("data-nudge");
     if (!action) return;
 
     const isRandom = action === "random";
     nudgeSelectedCell({ action, isRandom });
-  });
+  }
+
+  // Nudge bar: pointer events when available; touch/click as fallback (some iOS setups).
+  elNudgeBar?.addEventListener("pointerdown", handleNudgeBarEvent, { passive: false });
+  elNudgeBar?.addEventListener("touchstart", handleNudgeBarEvent, { passive: false });
+  elNudgeBar?.addEventListener("click", handleNudgeBarEvent);
 
   function onSongChainDrillDblClick(e) {
     if (activeScreen !== "S" && activeScreen !== "C") return;
