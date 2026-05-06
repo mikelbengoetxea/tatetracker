@@ -444,6 +444,107 @@ let gainNoise = null;
 let master = null;
 let stepEventId = null;
 
+// Track sustained notes per channel (LENGTH=1F).
+const heldNoteByChannel = new Array(4).fill(false);
+
+function safeInstrumentId(v) {
+  return clamp((v ?? 0) | 0, 0, NUM_INSTRUMENTS - 1);
+}
+
+function getInstrumentById(id) {
+  ensureInstrumentsInState(state);
+  return state.instruments[safeInstrumentId(id)] ?? defaultInstrumentObject(0);
+}
+
+function channelPanner(ch) {
+  return ch === 0 ? panPulse1 : ch === 1 ? panPulse2 : ch === 2 ? panWave : panNoise;
+}
+function channelGain(ch) {
+  return ch === 0 ? gainPulse1 : ch === 1 ? gainPulse2 : ch === 2 ? gainWave : gainNoise;
+}
+function channelSynth(ch) {
+  return ch === 0 ? synthPulse1 : ch === 1 ? synthPulse2 : ch === 2 ? synthWave : synthNoise;
+}
+
+function panFromOutput(output) {
+  const o = clamp((output ?? 0) | 0, 0, 2);
+  if (o === 1) return -1;
+  if (o === 2) return 1;
+  return 0;
+}
+
+function applyInstrumentToChannelAtTime(channel, instrument, time) {
+  const ch = clamp(channel | 0, 0, 3);
+  const ins = instrument || defaultInstrumentObject(0);
+
+  // Mode -> oscillator/noise type
+  if (ch === 0 || ch === 1) {
+    const width =
+      ins.mode === 0 ? 0.125 :
+      ins.mode === 1 ? 0.25 :
+      ins.mode === 2 ? 0.5 : 0.75;
+    applyPulseWidthAtTime(ch === 0 ? synthPulse1 : synthPulse2, width, time);
+  } else if (ch === 2) {
+    const waveType =
+      ins.mode === 0 ? "triangle" :
+      ins.mode === 1 ? "sawtooth" :
+      ins.mode === 2 ? "square" : "sine";
+    if (synthWave?.oscillator?.type != null) {
+      try {
+        if (synthWave.oscillator.setValueAtTime) synthWave.oscillator.type = waveType;
+        else synthWave.oscillator.type = waveType;
+      } catch {
+        /* ignore */
+      }
+    }
+  } else {
+    const noiseType =
+      ins.mode === 0 ? "white" :
+      ins.mode === 1 ? "pink" :
+      ins.mode === 2 ? "brown" : "brown";
+    if (synthNoise?.noise?.type != null) {
+      try {
+        synthNoise.noise.type = noiseType;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // Output (pan) is set per-trigger in triggerStep to allow CMD 'O' override.
+}
+
+function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, stepDurSec) {
+  const ch = clamp(channel | 0, 0, 3);
+  const g = channelGain(ch);
+  if (!g?.gain) return;
+  const ins = instrument || defaultInstrumentObject(0);
+
+  const initial = clamp((clampByte(ins.env1) || 0) / 255, 0, 1);
+  const fadeOut = (clampByte(ins.env2) | 0) === 0;
+  const speed = clampByte(ins.env3) / 255; // 0..1
+  const dur = clamp(stepDurSec * (0.15 + speed * 3.0), 0.01, stepDurSec * 4);
+
+  try {
+    if (g.gain.cancelScheduledValues) g.gain.cancelScheduledValues(time);
+    if (g.gain.setValueAtTime) g.gain.setValueAtTime(initial, time);
+    else g.gain.value = initial;
+    const target = fadeOut ? 0 : 1;
+    if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(target, time + dur);
+  } catch {
+    /* ignore */
+  }
+}
+
+function lengthSecondsFromInstrument(instrument, stepDurSec) {
+  const ins = instrument || defaultInstrumentObject(0);
+  const L = clamp((ins.length ?? 0) | 0, 0, 31);
+  if (L === 0x1f) return Infinity;
+  if (L <= 0x00) return 0;
+  // Interpret 01..1E as 16th-note multiples (musically intuitive in a tracker).
+  return clamp(L, 1, 30) * stepDurSec;
+}
+
 // Screens (LSDj-ish map)
 const SCREEN_MAP = [
   ["S", "C", "P"],
@@ -1347,6 +1448,7 @@ function applyNudgeToInstrumentParam(paramRow, action, isRandom) {
   if (pr === 0) {
     if (isRandom) instrumentTargetIndex = randomInt(0, NUM_INSTRUMENTS - 1);
     else instrumentTargetIndex = clamp((cur || 0) + sign * step, 0, NUM_INSTRUMENTS - 1);
+    applyLiveInstrumentUpdateForId(instrumentTargetIndex);
     return;
   }
   ensureInstrumentsInState(state);
@@ -1377,6 +1479,27 @@ function applyNudgeToInstrumentParam(paramRow, action, isRandom) {
     else ins.env3 = clampByte(b + sign * step);
   }
   ins.name = instrumentDefaultName(instrumentTargetIndex);
+  applyLiveInstrumentUpdateForId(instrumentTargetIndex);
+}
+
+function applyLiveInstrumentUpdateForId(instrumentId) {
+  if (!engineReady) return;
+  const id = safeInstrumentId(instrumentId);
+  const ins = getInstrumentById(id);
+  const t = clamp(ins.type | 0, 0, 2);
+  const channels = t === 0 ? [id & 1] : t === 1 ? [2] : [3];
+  const now = Tone.getContext()?.rawContext?.currentTime ?? 0;
+  for (const ch of channels) {
+    applyInstrumentToChannelAtTime(ch, ins, now);
+    const p = channelPanner(ch);
+    const pan = panFromOutput(ins.output);
+    try {
+      if (p?.pan?.setValueAtTime) p.pan.setValueAtTime(pan, now);
+      else if (p?.pan?.value != null) p.pan.value = pan;
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /**
@@ -2522,7 +2645,9 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   const cmd = normalizeCmd(step.cmd);
   if (!step.note && cmd !== "D" && cmd !== "T") return;
 
-  const channel = Number.isFinite(opts.channelOverride) ? clamp(opts.channelOverride | 0, 0, 3) : instrToChannel(step.instr);
+  const instrumentId = safeInstrumentId(step.instr);
+  const instrument = getInstrumentById(instrumentId);
+  const channel = Number.isFinite(opts.channelOverride) ? clamp(opts.channelOverride | 0, 0, 3) : instrToChannel(instrumentId);
   const valByte = step.val;
 
   let vel = 0.9;
@@ -2544,8 +2669,11 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     channel === 2 ? panWave :
     panNoise;
 
-  // LSDj-style default: center pan unless 'O' explicitly sets it.
-  const nextPan = cmd === "O" ? panFromByte(valByte) : 0;
+  // Apply instrument MODE immediately for this trigger.
+  applyInstrumentToChannelAtTime(channel, instrument, time);
+
+  // Output pan: instrument default unless CMD 'O' explicitly sets it.
+  const nextPan = cmd === "O" ? panFromByte(valByte) : panFromOutput(instrument.output);
   if (panner?.pan?.setValueAtTime) {
     panner.pan.setValueAtTime(nextPan, time);
   } else if (panner?.pan?.value != null) {
@@ -2565,6 +2693,9 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     return;
   }
 
+  // Volume envelope (ENV1/2/3) on the channel gain.
+  scheduleInstrumentEnvelopeAtTime(channel, instrument, time, stepDurSec);
+
   // D: retrigger within the step. When note is empty and D is used on noise channel,
   // still produce a roll.
   if (cmd === "D") {
@@ -2583,12 +2714,34 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   }
 
   if (synth === synthNoise) {
-    synth.triggerAttackRelease(stepDurSec * 0.85, time, vel);
+    // NoiseSynth: treat LENGTH like a release time when possible.
+    const lenSec = lengthSecondsFromInstrument(instrument, stepDurSec);
+    const dur = Number.isFinite(lenSec) ? Math.max(0.01, lenSec) : stepDurSec * 0.85;
+    if (lenSec === Infinity && typeof synth.triggerAttack === "function") {
+      if (heldNoteByChannel[channel] && typeof synth.triggerRelease === "function") {
+        try { synth.triggerRelease(time); } catch { /* ignore */ }
+      }
+      heldNoteByChannel[channel] = true;
+      try { synth.triggerAttack(time, vel); } catch { synth.triggerAttack(time); }
+    } else {
+      heldNoteByChannel[channel] = false;
+      synth.triggerAttackRelease(dur, time, vel);
+    }
     return;
   }
 
   if (!step.note) return;
   const baseNote = transposeSemis !== 0 ? transposeNoteBySemis(step.note, transposeSemis) : step.note;
+
+  const lenSec = lengthSecondsFromInstrument(instrument, stepDurSec);
+  if (lenSec <= 0) return;
+
+  // If a previous note was held (LENGTH=1F), release it before retriggering.
+  if (heldNoteByChannel[channel] && typeof synth.triggerRelease === "function") {
+    try { synth.triggerRelease(time); } catch { /* ignore */ }
+    heldNoteByChannel[channel] = false;
+  }
+
   if (cmd === "A") {
     const v = valByte == null ? 0x00 : clamp(valByte | 0, 0, 255);
     const x = (v >> 4) & 0x0f;
@@ -2603,7 +2756,13 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
       synth.triggerAttackRelease(notes[i], sub * 0.85, time + i * sub, vel);
     }
   } else {
-    synth.triggerAttackRelease(baseNote, stepDurSec * 0.85, time, vel);
+    if (lenSec === Infinity && typeof synth.triggerAttack === "function") {
+      heldNoteByChannel[channel] = true;
+      synth.triggerAttack(baseNote, time, vel);
+    } else {
+      heldNoteByChannel[channel] = false;
+      synth.triggerAttackRelease(baseNote, Math.max(0.01, lenSec), time, vel);
+    }
   }
 
   // P: pitch slide in cents over the step duration, then reset.
