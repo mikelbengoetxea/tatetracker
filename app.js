@@ -32,8 +32,8 @@ const INSTRUMENT_ROW_LABELS = [
   "ENV 1",
   "ENV 2",
   "ENV 3",
-  "OUTPUT",
   "LENGTH",
+  "OUTPUT",
   "TABLE",
 ];
 const TABLE_PRESET_NAMES = [
@@ -64,11 +64,11 @@ function defaultInstrumentObject(index) {
   return {
     name: instrumentDefaultName(index),
     type: 0,
-    mode: 0,
-    env1: 0x80,
-    env2: 0x00,
-    env3: 0x40,
-    output: 0,
+    mode: 0x01,
+    env1: 0x0a,
+    env2: 0x01,
+    env3: 0x00,
+    output: 0x00,
     length: 0x1f,
     tablePreset: 0,
   };
@@ -527,23 +527,30 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
   const envDurRaw = (nib / 15) * 3.0; // seconds
   const len = Number.isFinite(lengthSec) ? Math.max(0, lengthSec) : Infinity;
   const envDur = Number.isFinite(len) ? Math.min(envDurRaw, len) : envDurRaw;
+  const floor = 0.0001;
 
   try {
     if (g.gain.cancelScheduledValues) g.gain.cancelScheduledValues(time);
-    if (g.gain.setValueAtTime) g.gain.setValueAtTime(initial, time);
-    else g.gain.value = initial;
-    const target = fadeOut ? 0 : 1;
-    if (envDur <= 0) {
-      if (g.gain.setValueAtTime) g.gain.setValueAtTime(target, time);
-      else g.gain.value = target;
-    } else if (g.gain.linearRampToValueAtTime) {
-      g.gain.linearRampToValueAtTime(target, time + envDur);
+    const start = Math.max(floor, initial);
+    if (g.gain.setValueAtTime) g.gain.setValueAtTime(start, time);
+    else g.gain.value = start;
+
+    // ENV2: 0 = Down (to 0). >0 = Up/Stay (hold, or slight up-ramp).
+    // ENV3: 0 = no ramp.
+    if (envDur > 0) {
+      if (fadeOut) {
+        if (g.gain.exponentialRampToValueAtTime) g.gain.exponentialRampToValueAtTime(floor, time + envDur);
+        else if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(0, time + envDur);
+      } else {
+        const upTarget = clamp(start + 0.08, floor, 1);
+        if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(upTarget, time + envDur);
+      }
     }
 
     // LENGTH gate: force to 0 at exactly the length boundary.
     if (Number.isFinite(len) && len > 0) {
+      if (g.gain.exponentialRampToValueAtTime) g.gain.exponentialRampToValueAtTime(floor, time + len);
       if (g.gain.setValueAtTime) g.gain.setValueAtTime(0, time + len);
-      else g.gain.value = 0;
     }
   } catch {
     /* ignore */
@@ -555,12 +562,19 @@ function lengthSecondsFromInstrument(instrument) {
   const L = clamp((ins.length ?? 0) | 0, 0, 31);
   if (L === 0x1f) return Infinity;
   if (L <= 0x00) return 0;
-  // Absolute linear scale: 01..1E => 50ms..2000ms
-  const lo = 50;
-  const hi = 2000;
+  // Absolute piecewise-linear scale with clear anchors:
+  // 01 -> 50ms, 10 -> 1000ms, 1E -> 2000ms.
   const n = clamp(L, 1, 30);
-  const t = (n - 1) / 29; // 0..1
-  const ms = lo + (hi - lo) * t;
+  let ms;
+  if (n <= 0x10) {
+    // 01..10 => 50..1000
+    const t = (n - 1) / 15; // 0..1
+    ms = 50 + (1000 - 50) * t;
+  } else {
+    // 10..1E => 1000..2000
+    const t = (n - 0x10) / 14; // 0..1
+    ms = 1000 + (2000 - 1000) * t;
+  }
   return ms / 1000;
 }
 
@@ -1421,8 +1435,8 @@ function readInstrumentParamValue(paramRow) {
   if (pr === 3) return ins.env1;
   if (pr === 4) return ins.env2;
   if (pr === 5) return ins.env3;
-  if (pr === 6) return ins.output;
-  if (pr === 7) return ins.length;
+  if (pr === 6) return ins.length;
+  if (pr === 7) return ins.output;
   return ins.tablePreset;
 }
 
@@ -1445,11 +1459,11 @@ function instrumentStatusForRow(paramRow) {
   if (pr === 3) return `Initial Volume: ${toHex2(clampByte(ins.env1))}`;
   if (pr === 4) return `Env Direction: ${(ins.env2 & 0x80) !== 0 ? "Down" : "Up"}`;
   if (pr === 5) return `Env Speed/Length: ${toHex2(clampByte(ins.env3))}`;
-  if (pr === 6) return `Output: ${OUTPUT_LABELS[clamp(ins.output, 0, 2)]}`;
-  if (pr === 7) {
+  if (pr === 6) {
     const L = clamp(ins.length | 0, 0, 31);
     return L === 0x1f ? "Note Length: Unlimited" : `Note Length: ${toHex2(L)}`;
   }
+  if (pr === 7) return `Output: ${OUTPUT_LABELS[clamp(ins.output, 0, 2)]}`;
   return `Preset: ${TABLE_PRESET_NAMES[clamp(ins.tablePreset | 0, 0, 11)]}`;
 }
 
@@ -1467,8 +1481,8 @@ function setInstrumentParamFromRaw(paramRow, raw) {
   else if (pr === 3) ins.env1 = clampByte(v);
   else if (pr === 4) ins.env2 = clampByte(v);
   else if (pr === 5) ins.env3 = clampByte(v);
-  else if (pr === 6) ins.output = clamp(v, 0, 2);
-  else if (pr === 7) ins.length = clamp(v, 0, 31);
+  else if (pr === 6) ins.length = clamp(v, 0, 31);
+  else if (pr === 7) ins.output = clamp(v, 0, 2);
   else ins.tablePreset = clamp(v, 0, 11);
   ins.name = instrumentDefaultName(instrumentTargetIndex);
 }
@@ -1494,11 +1508,11 @@ function applyNudgeToInstrumentParam(paramRow, action, isRandom) {
     if (isRandom) ins.mode = randomInt(0, 3);
     else ins.mode = clamp(ins.mode + sign * (isJump ? 2 : 1), 0, 3);
   } else if (pr === 6) {
-    if (isRandom) ins.output = randomInt(0, 2);
-    else ins.output = clamp(ins.output + sign * (isJump ? 2 : 1), 0, 2);
-  } else if (pr === 7) {
     if (isRandom) ins.length = randomInt(0, 31);
     else ins.length = clamp(ins.length + sign * (isJump ? 8 : 1), 0, 31);
+  } else if (pr === 7) {
+    if (isRandom) ins.output = randomInt(0, 2);
+    else ins.output = clamp(ins.output + sign * (isJump ? 2 : 1), 0, 2);
   } else if (pr === 8) {
     if (isRandom) ins.tablePreset = randomInt(0, 11);
     else ins.tablePreset = clamp(ins.tablePreset + sign * (isJump ? 4 : 1), 0, 11);
