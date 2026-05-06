@@ -18,10 +18,87 @@ const CHAIN_COLS = [
 const COLS = [
   { key: "row", label: "Row", kind: "row" },
   { key: "note", label: "Note", kind: "note" },
-  { key: "instr", label: "Instr", kind: "byte" },
+  { key: "instr", label: "INST", kind: "byte" },
   { key: "cmd", label: "Cmd", kind: "cmd" },
   { key: "val", label: "Val", kind: "byte" },
 ];
+
+const NUM_INSTRUMENTS = 32;
+const INSTRUMENT_PARAM_ROWS = 9;
+const INSTRUMENT_ROW_LABELS = [
+  "INSTR",
+  "TYPE",
+  "MODE",
+  "ENV 1",
+  "ENV 2",
+  "ENV 3",
+  "OUTPUT",
+  "LENGTH",
+  "TABLE",
+];
+const TABLE_PRESET_NAMES = [
+  "None",
+  "Kick",
+  "Snare",
+  "Hat-C",
+  "Hat-O",
+  "Bass",
+  "Lead",
+  "Pad",
+  "Sweep",
+  "Zap",
+  "Glitch",
+  "Arp",
+];
+const PULSE_MODE_LABELS = ["12.5%", "25%", "50%", "75%"];
+const WAVE_MODE_LABELS = ["Tri", "Saw", "Sq", "Sine"];
+const NOISE_MODE_LABELS = ["White", "Pink", "Metal", "Brown"];
+const OUTPUT_LABELS = ["Both", "Left", "Right"];
+const INSTRUMENT_TYPE_LABELS = ["Pulse", "Wave", "Noise"];
+
+function instrumentDefaultName(index) {
+  return `INST ${idHex(clamp(index | 0, 0, NUM_INSTRUMENTS - 1))}`;
+}
+
+function defaultInstrumentObject(index) {
+  return {
+    name: instrumentDefaultName(index),
+    type: 0,
+    mode: 0,
+    env1: 0x80,
+    env2: 0x00,
+    env3: 0x40,
+    output: 0,
+    length: 0x1f,
+    tablePreset: 0,
+  };
+}
+
+function normalizeInstrumentObject(index, raw) {
+  const base = defaultInstrumentObject(index);
+  if (!raw || typeof raw !== "object") return base;
+  const o = { ...base, ...raw };
+  o.name = instrumentDefaultName(index);
+  o.type = clamp(Number(o.type) || 0, 0, 2);
+  o.mode = clamp(Number(o.mode) || 0, 0, 3);
+  o.env1 = clampByte(o.env1 ?? base.env1);
+  o.env2 = clampByte(o.env2 ?? base.env2);
+  o.env3 = clampByte(o.env3 ?? base.env3);
+  o.output = clamp(Number(o.output) || 0, 0, 2);
+  o.length = clamp(Number(o.length) || 0, 0, 31);
+  o.tablePreset = clamp(Number(o.tablePreset) || 0, 0, 11);
+  return o;
+}
+
+function ensureInstrumentsInState(s) {
+  if (!Array.isArray(s.instruments) || s.instruments.length !== NUM_INSTRUMENTS) {
+    s.instruments = Array.from({ length: NUM_INSTRUMENTS }, (_, i) => defaultInstrumentObject(i));
+  } else {
+    for (let i = 0; i < NUM_INSTRUMENTS; i++) {
+      s.instruments[i] = normalizeInstrumentObject(i, s.instruments[i]);
+    }
+  }
+}
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
@@ -168,7 +245,7 @@ function defaultState() {
       val: null,
     })),
   };
-  return {
+  const out = {
     bpm: 120,
     visualOffsetMs: 0,
     pulse1Width: 50,
@@ -183,9 +260,12 @@ function defaultState() {
     phrases: {
       0x00: phrase00,
     },
+    instruments: Array.from({ length: NUM_INSTRUMENTS }, (_, i) => defaultInstrumentObject(i)),
     selectionAnchor: null,
     selectedRange: null,
   };
+  ensureInstrumentsInState(out);
+  return out;
 }
 
 function loadState() {
@@ -267,6 +347,10 @@ function loadState() {
       s.chains[0x00] = Array.from({ length: ROWS }, () => ({ phraseId: 0x00, tsp: 0x00 }));
     }
 
+    if (Array.isArray(parsed?.instruments)) {
+      s.instruments = parsed.instruments;
+    }
+    ensureInstrumentsInState(s);
     return s;
   } catch {
     return defaultState();
@@ -324,6 +408,7 @@ const elPhraseView = document.getElementById("phraseView");
 const elSongView = document.getElementById("songView");
 const elChainView = document.getElementById("chainView");
 const elInstrumentView = document.getElementById("instrumentView");
+const elInstrumentGrid = document.getElementById("instrumentGrid");
 const elPlaceholderView = document.getElementById("placeholderView");
 const elPlaceholderTitle = document.getElementById("placeholderTitle");
 const elNavMap = document.getElementById("navMap");
@@ -380,6 +465,10 @@ let songSelCol = 0; // 0..3 => PU1..NOI
 let chainSelRow = 0;
 let chainSelCol = 0; // 0..1 => PHR/TSP
 
+let instrumentTargetIndex = 0;
+let instSelRow = 0;
+let instSelCol = 1;
+
 let playChainRow = -1;
 let playSongRow = -1;
 let playMode = "P"; // "P" | "C" | "S"
@@ -406,6 +495,9 @@ function getSelectedEditCellElement() {
   if (activeScreen === "C") {
     return elChainView?.querySelector(".list16__cell.list16__cell--selected.editcell") ?? null;
   }
+  if (activeScreen === "I") {
+    return elInstrumentView?.querySelector(".list16__cell.list16__cell--selected.editcell") ?? null;
+  }
   return null;
 }
 
@@ -418,6 +510,7 @@ function syncCellChevronUI() {
   removeCellChevronsInRoot(elTracker);
   removeCellChevronsInRoot(elSongView);
   removeCellChevronsInRoot(elChainView);
+  removeCellChevronsInRoot(elInstrumentView);
   const el = getSelectedEditCellElement();
   if (!(el instanceof HTMLElement)) return;
   const ch = document.createElement("span");
@@ -467,7 +560,7 @@ function viewStatusText() {
   if (activeScreen === "S") return "SONG";
   if (activeScreen === "C") return `CHAIN ${idHex(activeChainId)}`;
   if (activeScreen === "P") return `PHRASE ${idHex(activePhraseId)}`;
-  if (activeScreen === "I") return "INSTRUMENT";
+  if (activeScreen === "I") return `INST ${idHex(instrumentTargetIndex)}`;
   if (activeScreen === "T") return "TABLE";
   return "--";
 }
@@ -489,13 +582,14 @@ function currentPhrase() {
 }
 
 function normalizeInstr(value) {
-  if (value == null) return 0x00;
+  if (value == null) return null;
   const v = clamp(value | 0, 0, 255);
-  return clamp(v, 0, 3);
+  return clamp(v, 0, 31);
 }
 
 function displayInstr(value) {
-  return toHex2(normalizeInstr(value));
+  if (value == null) return "--";
+  return toHex2(clamp(value | 0, 0, 31));
 }
 
 function displayValForStep(step) {
@@ -748,25 +842,53 @@ function setActiveScreen(next) {
     setStatus(`${SCREEN_NAMES[activeScreen]} screen (placeholder).`);
     setStatusCursor();
   }
-  if (activeScreen === "P" || activeScreen === "S" || activeScreen === "C") {
+  if (activeScreen === "P" || activeScreen === "S" || activeScreen === "C" || activeScreen === "I") {
     syncGhostSelectToSelection();
   }
   renderNavMap();
+  if (activeScreen === "I") {
+    setStatus(instrumentStatusForRow(instSelRow));
+  }
 }
 
 function renderInstrumentView() {
-  // Static HTML already exists; we just sync UI -> state.
-  if (elWavType) elWavType.value = String(state.wavType || "triangle");
-  if (elNoiseType) elNoiseType.value = String(state.noiseType || "white");
-  const vols = Array.isArray(state.mixVol) ? state.mixVol : [90, 90, 90, 90];
-  if (elMixVol0) elMixVol0.value = String(clamp(vols[0] ?? 90, 0, 100));
-  if (elMixVol1) elMixVol1.value = String(clamp(vols[1] ?? 90, 0, 100));
-  if (elMixVol2) elMixVol2.value = String(clamp(vols[2] ?? 90, 0, 100));
-  if (elMixVol3) elMixVol3.value = String(clamp(vols[3] ?? 90, 0, 100));
-  if (elMixVol0Val) elMixVol0Val.textContent = elMixVol0?.value ?? "";
-  if (elMixVol1Val) elMixVol1Val.textContent = elMixVol1?.value ?? "";
-  if (elMixVol2Val) elMixVol2Val.textContent = elMixVol2?.value ?? "";
-  if (elMixVol3Val) elMixVol3Val.textContent = elMixVol3?.value ?? "";
+  if (!elInstrumentGrid) return;
+  ensureInstrumentsInState(state);
+  elInstrumentGrid.innerHTML = "";
+  elInstrumentGrid.className = "list16 list16--instrument";
+
+  const header = document.createElement("div");
+  header.className = "list16__row list16__row--header";
+  const h0 = document.createElement("div");
+  h0.className = "list16__cell";
+  h0.textContent = "Param";
+  const h1 = document.createElement("div");
+  h1.className = "list16__cell";
+  h1.textContent = "Val";
+  header.appendChild(h0);
+  header.appendChild(h1);
+  elInstrumentGrid.appendChild(header);
+
+  for (let r = 0; r < INSTRUMENT_PARAM_ROWS; r++) {
+    const row = document.createElement("div");
+    row.className = "list16__row";
+    const cLab = document.createElement("div");
+    cLab.className = "list16__cell";
+    cLab.textContent = INSTRUMENT_ROW_LABELS[r] ?? "--";
+    const cVal = document.createElement("div");
+    cVal.className = "list16__cell editcell";
+    cVal.dataset.screen = "I";
+    cVal.dataset.row = String(r);
+    cVal.dataset.col = "1";
+    cVal.textContent = displayInstrumentParamCell(r);
+    if (r === instSelRow && instSelCol === 1) cVal.classList.add("list16__cell--selected");
+    if (cellInSelectedRange("I", r, 1)) cVal.classList.add("list16__cell--range-highlight");
+    row.appendChild(cLab);
+    row.appendChild(cVal);
+    elInstrumentGrid.appendChild(row);
+  }
+
+  if (activeScreen === "I") syncGhostSelectToSelection();
   setStatusCursor();
 }
 
@@ -915,6 +1037,8 @@ function flashBlockedSelection() {
     el = elChainView?.querySelector(`.list16__cell--selected`);
   } else if (activeScreen === "P") {
     el = elTracker.querySelector(`.cell[data-row="${selRow}"][data-col="${selCol}"]`);
+  } else if (activeScreen === "I") {
+    el = elInstrumentView?.querySelector(`.list16__cell.list16__cell--selected`);
   }
   if (!el) return;
   el.classList.add("cell--flash");
@@ -979,6 +1103,15 @@ function moveChainSelectionCol(dc) {
   setStatusCursor();
 }
 
+function moveInstrumentSelection(dr, dc) {
+  if (activeScreen !== "I") return;
+  instSelRow = clamp(instSelRow + dr, 0, INSTRUMENT_PARAM_ROWS - 1);
+  instSelCol = clamp(instSelCol + dc, 1, 1);
+  renderInstrumentView();
+  setStatusCursor();
+  setStatus(instrumentStatusForRow(instSelRow));
+}
+
 function clearCell() {
   if (activeScreen === "S") {
     const row = state.song?.[songSelRow];
@@ -1003,6 +1136,29 @@ function clearCell() {
     setStatus(`Cleared Chain ${idHex(activeChainId)} ${CHAIN_COLS[chainSelCol]?.key ?? "--"} @ ${rowHex(chainSelRow)}.`);
     return;
   }
+  if (activeScreen === "I") {
+    const pr = clamp(instSelRow | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
+    ensureInstrumentsInState(state);
+    const d = defaultInstrumentObject(instrumentTargetIndex);
+    if (pr === 0) instrumentTargetIndex = 0;
+    else {
+      const ins = state.instruments[instrumentTargetIndex];
+      if (pr === 1) ins.type = d.type;
+      else if (pr === 2) ins.mode = d.mode;
+      else if (pr === 3) ins.env1 = d.env1;
+      else if (pr === 4) ins.env2 = d.env2;
+      else if (pr === 5) ins.env3 = d.env3;
+      else if (pr === 6) ins.output = d.output;
+      else if (pr === 7) ins.length = d.length;
+      else if (pr === 8) ins.tablePreset = d.tablePreset;
+      ins.name = instrumentDefaultName(instrumentTargetIndex);
+    }
+    saveState();
+    renderInstrumentView();
+    setStatusCursor();
+    setStatus(`Cleared ${INSTRUMENT_ROW_LABELS[pr] ?? "param"}.`);
+    return;
+  }
   if (activeScreen !== "P") return;
   if (selCol === 0) {
     setStatus("Row column is not editable.");
@@ -1011,7 +1167,7 @@ function clearCell() {
   const step = currentPhrase().steps[selRow];
   const key = COLS[selCol].key;
   if (key === "note") step.note = "";
-  if (key === "instr") step.instr = 0x00;
+  if (key === "instr") step.instr = null;
   if (key === "cmd") { step.cmd = null; step.val = null; }
   if (key === "val") step.val = normalizeCmd(step.cmd) ? 0x00 : null;
   step.instr = normalizeInstr(step.instr);
@@ -1111,6 +1267,118 @@ function rangeRandomSelectionHasContent(screen, rng) {
   return false;
 }
 
+function modeLabelForTypeAndMode(type, mode) {
+  const t = clamp(type | 0, 0, 2);
+  const m = clamp(mode | 0, 0, 3);
+  if (t === 0) return PULSE_MODE_LABELS[m];
+  if (t === 1) return WAVE_MODE_LABELS[m];
+  return NOISE_MODE_LABELS[m];
+}
+
+function readInstrumentParamValue(paramRow) {
+  const pr = clamp(paramRow | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
+  if (pr === 0) return instrumentTargetIndex;
+  ensureInstrumentsInState(state);
+  const ins = state.instruments[instrumentTargetIndex];
+  if (!ins) return 0;
+  if (pr === 1) return ins.type;
+  if (pr === 2) return ins.mode;
+  if (pr === 3) return ins.env1;
+  if (pr === 4) return ins.env2;
+  if (pr === 5) return ins.env3;
+  if (pr === 6) return ins.output;
+  if (pr === 7) return ins.length;
+  return ins.tablePreset;
+}
+
+function displayInstrumentParamCell(paramRow) {
+  const pr = clamp(paramRow | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
+  const v = readInstrumentParamValue(pr);
+  if (pr === 0 || pr === 1 || pr === 2 || pr === 6 || pr === 8) return toHex2(clamp(v | 0, 0, 255));
+  if (pr === 7) return toHex2(clamp(v | 0, 0, 31));
+  return toHex2(clampByte(v));
+}
+
+function instrumentStatusForRow(paramRow) {
+  const pr = clamp(paramRow | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
+  if (pr === 0) return `Editing Instrument ${idHex(instrumentTargetIndex)}`;
+  ensureInstrumentsInState(state);
+  const ins = state.instruments[instrumentTargetIndex];
+  if (!ins) return "--";
+  if (pr === 1) return `Type: ${INSTRUMENT_TYPE_LABELS[clamp(ins.type, 0, 2)]}`;
+  if (pr === 2) return `Mode: ${modeLabelForTypeAndMode(ins.type, ins.mode)}`;
+  if (pr === 3) return `Initial Volume: ${toHex2(clampByte(ins.env1))}`;
+  if (pr === 4) return `Env Direction: ${(ins.env2 & 0x80) !== 0 ? "Down" : "Up"}`;
+  if (pr === 5) return `Env Speed/Length: ${toHex2(clampByte(ins.env3))}`;
+  if (pr === 6) return `Output: ${OUTPUT_LABELS[clamp(ins.output, 0, 2)]}`;
+  if (pr === 7) {
+    const L = clamp(ins.length | 0, 0, 31);
+    return L === 0x1f ? "Note Length: Unlimited" : `Note Length: ${toHex2(L)}`;
+  }
+  return `Preset: ${TABLE_PRESET_NAMES[clamp(ins.tablePreset | 0, 0, 11)]}`;
+}
+
+function setInstrumentParamFromRaw(paramRow, raw) {
+  const pr = clamp(paramRow | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
+  const v = raw == null ? 0 : Number(raw) | 0;
+  if (pr === 0) {
+    instrumentTargetIndex = clamp(v, 0, NUM_INSTRUMENTS - 1);
+    return;
+  }
+  ensureInstrumentsInState(state);
+  const ins = state.instruments[instrumentTargetIndex];
+  if (pr === 1) ins.type = clamp(v, 0, 2);
+  else if (pr === 2) ins.mode = clamp(v, 0, 3);
+  else if (pr === 3) ins.env1 = clampByte(v);
+  else if (pr === 4) ins.env2 = clampByte(v);
+  else if (pr === 5) ins.env3 = clampByte(v);
+  else if (pr === 6) ins.output = clamp(v, 0, 2);
+  else if (pr === 7) ins.length = clamp(v, 0, 31);
+  else ins.tablePreset = clamp(v, 0, 11);
+  ins.name = instrumentDefaultName(instrumentTargetIndex);
+}
+
+function applyNudgeToInstrumentParam(paramRow, action, isRandom) {
+  const pr = clamp(paramRow | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
+  const sign = nudgeBarSign(action);
+  const isJump = action.startsWith("jump");
+  const step = isJump ? 16 : 1;
+  const cur = readInstrumentParamValue(pr);
+  if (pr === 0) {
+    if (isRandom) instrumentTargetIndex = randomInt(0, NUM_INSTRUMENTS - 1);
+    else instrumentTargetIndex = clamp((cur || 0) + sign * step, 0, NUM_INSTRUMENTS - 1);
+    return;
+  }
+  ensureInstrumentsInState(state);
+  const ins = state.instruments[instrumentTargetIndex];
+  if (pr === 1) {
+    if (isRandom) ins.type = randomInt(0, 2);
+    else ins.type = clamp(ins.type + sign * (isJump ? 2 : 1), 0, 2);
+  } else if (pr === 2) {
+    if (isRandom) ins.mode = randomInt(0, 3);
+    else ins.mode = clamp(ins.mode + sign * (isJump ? 2 : 1), 0, 3);
+  } else if (pr === 6) {
+    if (isRandom) ins.output = randomInt(0, 2);
+    else ins.output = clamp(ins.output + sign * (isJump ? 2 : 1), 0, 2);
+  } else if (pr === 7) {
+    if (isRandom) ins.length = randomInt(0, 31);
+    else ins.length = clamp(ins.length + sign * (isJump ? 8 : 1), 0, 31);
+  } else if (pr === 8) {
+    if (isRandom) ins.tablePreset = randomInt(0, 11);
+    else ins.tablePreset = clamp(ins.tablePreset + sign * (isJump ? 4 : 1), 0, 11);
+  } else {
+    const b = clampByte(cur);
+    if (isRandom) {
+      if (pr === 3) ins.env1 = randomInt(0, 255);
+      else if (pr === 4) ins.env2 = randomInt(0, 255);
+      else ins.env3 = randomInt(0, 255);
+    } else if (pr === 3) ins.env1 = clampByte(b + sign * step);
+    else if (pr === 4) ins.env2 = clampByte(b + sign * step);
+    else ins.env3 = clampByte(b + sign * step);
+  }
+  ins.name = instrumentDefaultName(instrumentTargetIndex);
+}
+
 /**
  * Single nudge application for one cell. Buttons use data-nudge:
  * `inc` / `dec` → ±1 semitone (note) or ±1 byte step (hex-ish columns);
@@ -1118,6 +1386,10 @@ function rangeRandomSelectionHasContent(screen, rng) {
  * `random` → randomize that cell’s field.
  */
 function applyNudgeToCell(screen, row, col, action, isRandom) {
+  if (screen === "I") {
+    applyNudgeToInstrumentParam(clamp(row, 0, INSTRUMENT_PARAM_ROWS - 1), action, isRandom);
+    return;
+  }
   if (screen === "S") {
     const rr = clamp(row, 0, ROWS - 1);
     const cc = clamp(col, 0, SONG_COLS.length - 1);
@@ -1177,8 +1449,8 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
     }
 
     if (colKey === "instr") {
-      const start = normalizeInstr(step.instr);
-      const next = isRandom ? randomInt(0, 3) : clamp(start + sign * (isJump ? 16 : 1), 0, 3);
+      const start = step.instr == null ? 0 : clamp(step.instr | 0, 0, 31);
+      const next = isRandom ? randomInt(0, 31) : clamp(start + sign * (isJump ? 16 : 1), 0, 31);
       step.instr = next;
       return;
     }
@@ -1207,15 +1479,23 @@ function nudgeSelectedRange({ action, isRandom, rng }) {
   const isRangeRandom = isRandom && action === "random";
 
   if (isRangeRandom) {
-    const hasContent = rangeRandomSelectionHasContent(screen, rng);
-    for (let r = rng.r1; r <= rng.r2; r++) {
-      for (let c = rng.c1; c <= rng.c2; c++) {
-        if (!hasContent) {
-          if (!(Math.random() < 0.5)) continue;
+    if (screen === "I") {
+      for (let r = rng.r1; r <= rng.r2; r++) {
+        for (let c = rng.c1; c <= rng.c2; c++) {
           applyNudgeToCell(screen, r, c, action, true);
-        } else {
-          if (rangeRandomCellIsEmpty(screen, r, c)) continue;
-          applyNudgeToCell(screen, r, c, action, true);
+        }
+      }
+    } else {
+      const hasContent = rangeRandomSelectionHasContent(screen, rng);
+      for (let r = rng.r1; r <= rng.r2; r++) {
+        for (let c = rng.c1; c <= rng.c2; c++) {
+          if (!hasContent) {
+            if (!(Math.random() < 0.5)) continue;
+            applyNudgeToCell(screen, r, c, action, true);
+          } else {
+            if (rangeRandomCellIsEmpty(screen, r, c)) continue;
+            applyNudgeToCell(screen, r, c, action, true);
+          }
         }
       }
     }
@@ -1234,12 +1514,23 @@ function nudgeSelectedRange({ action, isRandom, rng }) {
 }
 
 function nudgeSelectedCell({ action, isRandom }) {
-  if (activeScreen !== "P" && activeScreen !== "S" && activeScreen !== "C") return false;
+  if (activeScreen !== "P" && activeScreen !== "S" && activeScreen !== "C" && activeScreen !== "I") {
+    return false;
+  }
 
   const rng =
     state.selectedRange && state.selectedRange.screen === activeScreen ? state.selectedRange : null;
   if (rng) {
     return nudgeSelectedRange({ action, isRandom, rng });
+  }
+
+  if (activeScreen === "I") {
+    applyNudgeToInstrumentParam(instSelRow, action, isRandom);
+    saveState();
+    renderInstrumentView();
+    setStatusCursor();
+    setStatus(instrumentStatusForRow(instSelRow));
+    return true;
   }
 
   if (activeScreen === "S") {
@@ -1329,8 +1620,8 @@ function applyByteDelta(field, delta) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
   if (field === "instr") {
-    const cur = normalizeInstr(step.instr);
-    const next = clamp(cur + delta, 0, 3);
+    const cur = step.instr == null ? 0 : clamp(step.instr | 0, 0, 31);
+    const next = clamp(cur + delta, 0, 31);
     step.instr = next;
     saveState();
     renderTracker();
@@ -1381,9 +1672,13 @@ function immediateCenterPanForStep(step) {
   if (panner?.pan?.value != null) panner.pan.value = 0;
 }
 
-function cellTypeForGrid(screen, col) {
+function cellTypeForGrid(screen, col, rowHint = 0) {
   if (screen === "S") return "song.chainId";
   if (screen === "C") return col === 0 ? "chain.phraseId" : "chain.tsp";
+  if (screen === "I") {
+    const pr = clamp(rowHint | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
+    return `instrument.p${pr}`;
+  }
   if (screen === "P") {
     const key = COLS[col]?.key;
     if (key === "note") return "phrase.note";
@@ -1395,16 +1690,25 @@ function cellTypeForGrid(screen, col) {
 }
 
 function currentCellType() {
-  if (activeScreen === "S") return cellTypeForGrid("S", songSelCol);
-  if (activeScreen === "C") return cellTypeForGrid("C", chainSelCol);
-  if (activeScreen === "P") return cellTypeForGrid("P", selCol);
+  if (activeScreen === "S") return cellTypeForGrid("S", songSelCol, songSelRow);
+  if (activeScreen === "C") return cellTypeForGrid("C", chainSelCol, chainSelRow);
+  if (activeScreen === "P") return cellTypeForGrid("P", selCol, selRow);
+  if (activeScreen === "I") return cellTypeForGrid("I", instSelCol, instSelRow);
   return null;
 }
 
 function readCellValueAt(screen, r, c) {
-  const type = cellTypeForGrid(screen, c);
+  const irow = screen === "I" ? clamp(r | 0, 0, INSTRUMENT_PARAM_ROWS - 1) : clamp(r | 0, 0, ROWS - 1);
+  const type = cellTypeForGrid(screen, c, irow);
   if (!type) return null;
-  const row = clamp(r | 0, 0, ROWS - 1);
+
+  const mIns = /^instrument\.p(\d+)$/.exec(type);
+  if (mIns) {
+    const pr = clamp(parseInt(mIns[1], 10), 0, INSTRUMENT_PARAM_ROWS - 1);
+    return { type, value: readInstrumentParamValue(pr) };
+  }
+
+  const row = irow;
 
   if (type === "song.chainId") {
     const cc = clamp(c | 0, 0, SONG_COLS.length - 1);
@@ -1426,7 +1730,7 @@ function readCellValueAt(screen, r, c) {
   }
   const step = currentPhrase().steps[row];
   if (type === "phrase.note") return { type, value: normalizeNote(step.note) || "" };
-  if (type === "phrase.instr") return { type, value: normalizeInstr(step.instr) };
+  if (type === "phrase.instr") return { type, value: step.instr == null ? null : normalizeInstr(step.instr) };
   if (type === "phrase.cmd") return { type, value: normalizeCmd(step.cmd) };
   if (type === "phrase.val") return { type, value: step.val == null ? null : clampByte(step.val) };
   return null;
@@ -1434,9 +1738,18 @@ function readCellValueAt(screen, r, c) {
 
 function writeCellValueAt(screen, r, c, payload) {
   if (!payload?.type) return false;
-  const row = clamp(r | 0, 0, ROWS - 1);
-  const expected = cellTypeForGrid(screen, c);
+  const irow = screen === "I" ? clamp(r | 0, 0, INSTRUMENT_PARAM_ROWS - 1) : clamp(r | 0, 0, ROWS - 1);
+  const expected = cellTypeForGrid(screen, c, irow);
   if (payload.type !== expected) return false;
+
+  const mInsW = /^instrument\.p(\d+)$/.exec(expected);
+  if (mInsW) {
+    const pr = clamp(parseInt(mInsW[1], 10), 0, INSTRUMENT_PARAM_ROWS - 1);
+    setInstrumentParamFromRaw(pr, payload.value);
+    return true;
+  }
+
+  const row = irow;
 
   if (payload.type === "song.chainId") {
     const cc = clamp(c | 0, 0, SONG_COLS.length - 1);
@@ -1469,7 +1782,7 @@ function writeCellValueAt(screen, r, c, payload) {
     return true;
   }
   if (payload.type === "phrase.instr") {
-    step.instr = normalizeInstr(payload.value == null ? 0 : payload.value);
+    step.instr = payload.value == null ? null : normalizeInstr(payload.value);
     return true;
   }
   if (payload.type === "phrase.cmd") {
@@ -1507,12 +1820,31 @@ function clearCellAt(screen, r, c) {
     state.chains[activeChainId][row] = entry;
     return;
   }
+  if (screen === "I") {
+    const pr = clamp(r | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
+    ensureInstrumentsInState(state);
+    const d = defaultInstrumentObject(instrumentTargetIndex);
+    if (pr === 0) instrumentTargetIndex = 0;
+    else {
+      const ins = state.instruments[instrumentTargetIndex];
+      if (pr === 1) ins.type = d.type;
+      else if (pr === 2) ins.mode = d.mode;
+      else if (pr === 3) ins.env1 = d.env1;
+      else if (pr === 4) ins.env2 = d.env2;
+      else if (pr === 5) ins.env3 = d.env3;
+      else if (pr === 6) ins.output = d.output;
+      else if (pr === 7) ins.length = d.length;
+      else if (pr === 8) ins.tablePreset = d.tablePreset;
+      ins.name = instrumentDefaultName(instrumentTargetIndex);
+    }
+    return;
+  }
   if (screen === "P") {
     const cc = clamp(c | 0, 1, COLS.length - 1);
     const step = currentPhrase().steps[row];
     const key = COLS[cc].key;
     if (key === "note") step.note = "";
-    if (key === "instr") step.instr = 0x00;
+    if (key === "instr") step.instr = null;
     if (key === "cmd") {
       step.cmd = null;
       step.val = null;
@@ -1535,14 +1867,18 @@ function normalizeSelectedRangeRect(screen, ar, ac, br, bc) {
   let r2 = Math.max(ar, br);
   let c1 = Math.min(ac, bc);
   let c2 = Math.max(ac, bc);
-  r1 = clamp(r1, 0, ROWS - 1);
-  r2 = clamp(r2, 0, ROWS - 1);
+  const rMax = screen === "I" ? INSTRUMENT_PARAM_ROWS - 1 : ROWS - 1;
+  r1 = clamp(r1, 0, rMax);
+  r2 = clamp(r2, 0, rMax);
   if (screen === "S") {
     c1 = clamp(c1, 0, SONG_COLS.length - 1);
     c2 = clamp(c2, 0, SONG_COLS.length - 1);
   } else if (screen === "C") {
     c1 = clamp(c1, 0, 1);
     c2 = clamp(c2, 0, 1);
+  } else if (screen === "I") {
+    c1 = clamp(c1, 1, 1);
+    c2 = clamp(c2, 1, 1);
   } else if (screen === "P") {
     c1 = clamp(c1, 1, COLS.length - 1);
     c2 = clamp(c2, 1, COLS.length - 1);
@@ -1554,6 +1890,7 @@ function refreshRangeGridRenders() {
   if (activeScreen === "P") renderTracker({ force: true });
   else if (activeScreen === "S") renderSongView({ force: true });
   else if (activeScreen === "C") renderChainView({ force: true });
+  else if (activeScreen === "I") renderInstrumentView();
 }
 
 function clearTransientGridSelection() {
@@ -1566,6 +1903,7 @@ function getGridTouchRoot(screen) {
   if (screen === "P") return elTracker;
   if (screen === "S") return elSongView?.querySelector(".list16") ?? null;
   if (screen === "C") return elChainView?.querySelector(".list16") ?? null;
+  if (screen === "I") return elInstrumentGrid;
   return null;
 }
 
@@ -1584,6 +1922,8 @@ function gridCellHitFromClient(screen, clientX, clientY) {
   let selector;
   if (screen === "P") {
     selector = ".tracker-row .cell.editcell";
+  } else if (screen === "I") {
+    selector = ".list16--instrument .list16__row:not(.list16__row--header) .list16__cell.editcell";
   } else {
     selector = ".list16__row:not(.list16__row--header) .list16__cell.editcell";
   }
@@ -1593,6 +1933,7 @@ function gridCellHitFromClient(screen, clientX, clientY) {
     if (!(cell instanceof HTMLElement)) continue;
     if (screen === "S" && cell.dataset.screen !== "S") continue;
     if (screen === "C" && cell.dataset.screen !== "C") continue;
+    if (screen === "I" && cell.dataset.screen !== "I") continue;
     const rect = cell.getBoundingClientRect();
     if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue;
     const r = Number(cell.dataset.row);
@@ -1644,6 +1985,9 @@ function pasteRangeAtCursor(clip) {
   } else if (activeScreen === "C") {
     r0 = chainSelRow;
     c0 = chainSelCol;
+  } else if (activeScreen === "I") {
+    r0 = instSelRow;
+    c0 = instSelCol;
   } else {
     return false;
   }
@@ -1653,10 +1997,12 @@ function pasteRangeAtCursor(clip) {
     for (let j = 0; j < clip.w; j++) {
       const r = r0 + i;
       const c = c0 + j;
-      if (r < 0 || r > ROWS - 1) continue;
+      const rMax = clip.screen === "I" ? INSTRUMENT_PARAM_ROWS - 1 : ROWS - 1;
+      if (r < 0 || r > rMax) continue;
       if (clip.screen === "P" && (c < 1 || c > COLS.length - 1)) continue;
       if (clip.screen === "S" && (c < 0 || c > SONG_COLS.length - 1)) continue;
       if (clip.screen === "C" && (c < 0 || c > 1)) continue;
+      if (clip.screen === "I" && (c !== 1 || r < 0 || r > INSTRUMENT_PARAM_ROWS - 1)) continue;
       const payload = clip.rows[i][j];
       if (!payload) continue;
       if (writeCellValueAt(clip.screen, r, c, payload)) n++;
@@ -1695,7 +2041,8 @@ function handleGridTouchStart(e) {
   const screen =
     e.currentTarget === elTracker ? "P" :
     e.currentTarget === elSongView ? "S" :
-    e.currentTarget === elChainView ? "C" : null;
+    e.currentTarget === elChainView ? "C" :
+    e.currentTarget === elInstrumentGrid ? "I" : null;
   if (!screen || screen !== activeScreen) return;
 
   if (e.touches.length >= 2) {
@@ -1714,6 +2061,7 @@ function handleGridTouchStart(e) {
 
     state.selectedRange = normalizeSelectedRangeRect(screen, anchor.row, anchor.col, hit1.row, hit1.col);
     refreshRangeGridRenders();
+    if (screen === "I") setStatus(instrumentStatusForRow(instSelRow));
     return;
   }
 
@@ -1722,6 +2070,10 @@ function handleGridTouchStart(e) {
     const t = e.touches[0];
     const hit = gridCellHitFromClient(screen, t.clientX, t.clientY);
     if (!hit) return;
+    if (screen === "I") {
+      instSelRow = clamp(hit.row, 0, INSTRUMENT_PARAM_ROWS - 1);
+      instSelCol = 1;
+    }
     const prev = state.selectionAnchor;
     const sameCell =
       prev &&
@@ -1732,6 +2084,7 @@ function handleGridTouchStart(e) {
       state.selectionAnchor = { screen, row: hit.row, col: hit.col };
     }
     refreshRangeGridRenders();
+    if (screen === "I") setStatus(instrumentStatusForRow(instSelRow));
   }
 }
 
@@ -1742,7 +2095,8 @@ function handleGridTouchMove(e) {
   const screen =
     e.currentTarget === elTracker ? "P" :
     e.currentTarget === elSongView ? "S" :
-    e.currentTarget === elChainView ? "C" : null;
+    e.currentTarget === elChainView ? "C" :
+    e.currentTarget === elInstrumentGrid ? "I" : null;
   if (!screen || screen !== activeScreen) return;
 }
 
@@ -1750,11 +2104,23 @@ function readCurrentCellValue() {
   if (activeScreen === "S") return readCellValueAt("S", songSelRow, songSelCol);
   if (activeScreen === "C") return readCellValueAt("C", chainSelRow, chainSelCol);
   if (activeScreen === "P") return readCellValueAt("P", selRow, selCol);
+  if (activeScreen === "I") return readCellValueAt("I", instSelRow, instSelCol);
   return null;
 }
 
 function writeCurrentCellValue({ type, value }) {
   if (!type) return false;
+
+  if (activeScreen === "I" && /^instrument\.p\d+$/.test(type)) {
+    if (writeCellValueAt("I", instSelRow, instSelCol, { type, value })) {
+      saveState();
+      renderInstrumentView();
+      setStatusCursor();
+      setStatus(instrumentStatusForRow(instSelRow));
+      return true;
+    }
+    return false;
+  }
 
   if (type === "song.chainId") {
     const row = state.song?.[songSelRow];
@@ -1805,10 +2171,10 @@ function writeCurrentCellValue({ type, value }) {
     return true;
   }
   if (type === "phrase.instr") {
-    step.instr = normalizeInstr(value == null ? 0 : value);
+    step.instr = value == null ? null : normalizeInstr(value);
     saveState();
     renderTracker({ force: true });
-    setStatus(`Set INSTR = ${displayInstr(step.instr)}`);
+    setStatus(`Set INST = ${displayInstr(step.instr)}`);
     return true;
   }
   if (type === "phrase.cmd") {
@@ -1847,6 +2213,9 @@ function getSelectedCellElement() {
   }
   if (activeScreen === "C") {
     return elChainView?.querySelector(`.list16__cell.list16__cell--selected`);
+  }
+  if (activeScreen === "I") {
+    return elInstrumentView?.querySelector(`.list16__cell.list16__cell--selected`);
   }
   return null;
 }
@@ -2085,9 +2454,12 @@ function applyInstrumentSettingsFromState() {
 }
 
 function instrToChannel(instrHex) {
-  const v = instrHex == null ? 0 : clamp(instrHex | 0, 0, 255);
-  const idx = v & 0x03; // 00..03 map to 4 channels
-  return idx;
+  const idx = instrHex == null ? 0 : clamp(instrHex | 0, 0, 31);
+  ensureInstrumentsInState(state);
+  const t = state.instruments[idx]?.type ?? 0;
+  if (t === 0) return idx & 1; // Pulse → alternate PU1 / PU2
+  if (t === 1) return 2; // Wave
+  return 3; // Noise
 }
 
 function cmdVolumeToVelocity(valByte) {
@@ -2700,8 +3072,12 @@ function coerceProjectState(parsed) {
 
   // Ensure at least 00 exists
   if (!s.chains[0x00]) s.chains[0x00] = Array.from({ length: ROWS }, () => emptyChainRow());
-  if (!s.phrases[0x00]) s.phrases[0x00] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: 0x00, cmd: null, val: null })) };
+  if (!s.phrases[0x00]) s.phrases[0x00] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: null, cmd: null, val: null })) };
 
+  if (Array.isArray(parsed?.instruments)) {
+    s.instruments = parsed.instruments;
+  }
+  ensureInstrumentsInState(s);
   return s;
 }
 
@@ -2735,7 +3111,7 @@ function afterProjectLoaded(msg) {
   state.chains[activeChainId] = state.chains[activeChainId].map((r) => normalizeChainRow(r));
   activePhraseId = normalizeChainRow(state.chains[activeChainId][chainSelRow]).phraseId ?? 0x00;
   if (!state.phrases[activePhraseId]) {
-    state.phrases[activePhraseId] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: 0x00, cmd: null, val: null })) };
+    state.phrases[activePhraseId] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: null, cmd: null, val: null })) };
   }
 
   setActiveScreen(activeScreen);
@@ -2764,6 +3140,9 @@ function resetProject() {
   activeChainId = 0x00;
   activePhraseId = 0x00;
   activeScreen = "P";
+  instrumentTargetIndex = 0;
+  instSelRow = 0;
+  instSelCol = 1;
   playRow = -1;
   playChainRow = -1;
   playSongRow = -1;
@@ -2778,8 +3157,8 @@ function resetProject() {
 
 function initUI() {
   syncSettingsFormFromState();
-  elPulse1Width.value = String(state.pulse1Width);
-  elPulse2Width.value = String(state.pulse2Width);
+  if (elPulse1Width) elPulse1Width.value = String(state.pulse1Width);
+  if (elPulse2Width) elPulse2Width.value = String(state.pulse2Width);
   if (elWavType) elWavType.value = String(state.wavType || "triangle");
   if (elNoiseType) elNoiseType.value = String(state.noiseType || "white");
   const vols = Array.isArray(state.mixVol) ? state.mixVol : [90, 90, 90, 90];
@@ -2834,13 +3213,13 @@ function initUI() {
   elSettingsBpmSlider?.addEventListener("input", () => applyBpmFromSlider());
   elSettingsLatSlider?.addEventListener("input", () => applyVisualOffsetFromSlider());
   elSettingsOverlayDone?.addEventListener("click", () => hideSettingsOverlay());
-  elPulse1Width.addEventListener("change", () => {
+  elPulse1Width?.addEventListener("change", () => {
     state.pulse1Width = Number(elPulse1Width.value);
     saveState();
     applyPulseWidth(1, state.pulse1Width);
     setStatus(`Pulse 1 Width = ${state.pulse1Width}%.`);
   });
-  elPulse2Width.addEventListener("change", () => {
+  elPulse2Width?.addEventListener("change", () => {
     state.pulse2Width = Number(elPulse2Width.value);
     saveState();
     applyPulseWidth(2, state.pulse2Width);
@@ -3013,9 +3392,11 @@ function initUI() {
   elTracker?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
   elSongView?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
   elChainView?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
+  elInstrumentGrid?.addEventListener("touchstart", handleGridTouchStart, { passive: false });
   elTracker?.addEventListener("touchmove", handleGridTouchMove, { passive: false });
   elSongView?.addEventListener("touchmove", handleGridTouchMove, { passive: false });
   elChainView?.addEventListener("touchmove", handleGridTouchMove, { passive: false });
+  elInstrumentGrid?.addEventListener("touchmove", handleGridTouchMove, { passive: false });
 
   function pointerDownSelectList(e, expectedScreen) {
     if (activeScreen !== expectedScreen) return;
@@ -3054,6 +3435,32 @@ function initUI() {
 
   elSongView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "S"));
   elChainView?.addEventListener("pointerdown", (e) => pointerDownSelectList(e, "C"));
+
+  function pointerDownSelectInstrument(e) {
+    if (activeScreen !== "I") return;
+    if (e.pointerType === "touch" && e.isPrimary === false) {
+      e.preventDefault();
+      return;
+    }
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+    const listCell = target.classList.contains("list16__cell") ? target : target.closest(".list16__cell");
+    if (!listCell || !listCell.classList.contains("editcell")) return;
+    if (listCell.dataset.screen !== "I") return;
+    const r = Number(listCell.dataset.row);
+    const c = Number(listCell.dataset.col);
+    if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+    e.preventDefault();
+    state.selectedRange = null;
+    instSelRow = clamp(r, 0, INSTRUMENT_PARAM_ROWS - 1);
+    instSelCol = clamp(c, 1, 1);
+    state.selectionAnchor = { screen: "I", row: instSelRow, col: instSelCol };
+    renderInstrumentView();
+    setStatusCursor();
+    setStatus(instrumentStatusForRow(instSelRow));
+    focusMain();
+  }
+  elInstrumentGrid?.addEventListener("pointerdown", pointerDownSelectInstrument);
 
   function handleNudgeBarPointerDown(e) {
     const t = e.target;
@@ -3184,6 +3591,27 @@ function initUI() {
       if (e.key === "ArrowDown") { moveSongSelection(1); return; }
       if (e.key === "ArrowLeft") { moveSongSelectionCol(-1); return; }
       if (e.key === "ArrowRight") { moveSongSelectionCol(1); return; }
+      return;
+    }
+    if (activeScreen === "I") {
+      if (isZPressed) {
+        const action =
+          e.key === "ArrowUp" ? "inc" :
+          e.key === "ArrowDown" ? "dec" :
+          e.key === "ArrowRight" ? "jump_inc" :
+          e.key === "ArrowLeft" ? "jump_dec" : null;
+        if (action) {
+          applyNudgeToInstrumentParam(instSelRow, action, false);
+          saveState();
+          renderInstrumentView();
+          setStatus(instrumentStatusForRow(instSelRow));
+        }
+        return;
+      }
+      if (e.key === "ArrowUp") { moveInstrumentSelection(-1, 0); return; }
+      if (e.key === "ArrowDown") { moveInstrumentSelection(1, 0); return; }
+      if (e.key === "ArrowLeft") { moveInstrumentSelection(0, -1); return; }
+      if (e.key === "ArrowRight") { moveInstrumentSelection(0, 1); return; }
       return;
     }
     if (activeScreen === "C") {

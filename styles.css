@@ -907,3 +907,31 @@ html {
   text-align: right;
   color: var(--muted);
 }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.list16--instrument .list16__row:not(.list16__row--header) .list16__cell:first-child {
+  flex: 0 0 44%;
+  max-width: 50%;
+  justify-content: flex-start;
+  padding-left: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.list16--instrument .list16__row:not(.list16__row--header) .list16__cell:last-child {
+  flex: 1 1 auto;
+  font-size: 15px;
+}

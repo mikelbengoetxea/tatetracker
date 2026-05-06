@@ -33,80 +33,7 @@
           <div id="songView" class="screen" aria-label="Song view"></div>
           <div id="chainView" class="screen" aria-label="Chain view"></div>
           <div id="instrumentView" class="screen" aria-label="Instrument view">
-            <div class="instrument">
-              <div class="instrument__section">
-                <div class="instrument__title">PU1 / PU2</div>
-                <div class="instrument__grid2">
-                  <div class="control-group">
-                    <label class="label" for="pulse1Width">PU1 Width</label>
-                    <select id="pulse1Width" class="input input--select">
-                      <option value="12.5">12.5%</option>
-                      <option value="25">25%</option>
-                      <option value="50" selected>50%</option>
-                      <option value="75">75%</option>
-                    </select>
-                  </div>
-                  <div class="control-group">
-                    <label class="label" for="pulse2Width">PU2 Width</label>
-                    <select id="pulse2Width" class="input input--select">
-                      <option value="12.5">12.5%</option>
-                      <option value="25">25%</option>
-                      <option value="50" selected>50%</option>
-                      <option value="75">75%</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              <div class="instrument__section">
-                <div class="instrument__title">WAV / NOI</div>
-                <div class="instrument__grid2">
-                  <div class="control-group">
-                    <label class="label" for="wavType">WAV</label>
-                    <select id="wavType" class="input input--select">
-                      <option value="triangle" selected>Triangle</option>
-                      <option value="sawtooth">Saw</option>
-                      <option value="square">Square</option>
-                      <option value="sine">Sine</option>
-                    </select>
-                  </div>
-                  <div class="control-group">
-                    <label class="label" for="noiseType">NOI</label>
-                    <select id="noiseType" class="input input--select">
-                      <option value="white" selected>White</option>
-                      <option value="pink">Pink</option>
-                      <option value="brown">Metallic</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              <div class="instrument__section">
-                <div class="instrument__title">Mixer</div>
-                <div class="mixer">
-                  <div class="mixer__row">
-                    <div class="mixer__label mono">PU1</div>
-                    <input id="mixVol0" class="mixer__slider" type="range" min="0" max="100" step="1" value="90" />
-                    <div id="mixVol0Val" class="mixer__val mono">90</div>
-                  </div>
-                  <div class="mixer__row">
-                    <div class="mixer__label mono">PU2</div>
-                    <input id="mixVol1" class="mixer__slider" type="range" min="0" max="100" step="1" value="90" />
-                    <div id="mixVol1Val" class="mixer__val mono">90</div>
-                  </div>
-                  <div class="mixer__row">
-                    <div class="mixer__label mono">WAV</div>
-                    <input id="mixVol2" class="mixer__slider" type="range" min="0" max="100" step="1" value="90" />
-                    <div id="mixVol2Val" class="mixer__val mono">90</div>
-                  </div>
-                  <div class="mixer__row">
-                    <div class="mixer__label mono">NOI</div>
-                    <input id="mixVol3" class="mixer__slider" type="range" min="0" max="100" step="1" value="90" />
-                    <div id="mixVol3Val" class="mixer__val mono">90</div>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <div id="instrumentGrid" class="list16 list16--instrument" role="grid" aria-label="Instrument parameters"></div>
           </div>
         </div>
 
@@ -178,6 +105,19 @@
       <option value="paste">Paste</option>
       <option value="delete">Delete</option>
     </select>
+
+    <!-- Hidden legacy controls: engine still reads state.pulse* / wavType / noiseType / mixVol -->
+    <div class="visually-hidden" aria-hidden="true">
+      <select id="pulse1Width"><option value="12.5">12.5</option><option value="25">25</option><option value="50" selected>50</option><option value="75">75</option></select>
+      <select id="pulse2Width"><option value="12.5">12.5</option><option value="25">25</option><option value="50" selected>50</option><option value="75">75</option></select>
+      <select id="wavType"><option value="triangle" selected>triangle</option><option value="sawtooth">sawtooth</option><option value="square">square</option><option value="sine">sine</option></select>
+      <select id="noiseType"><option value="white" selected>white</option><option value="pink">pink</option><option value="brown">brown</option></select>
+      <input id="mixVol0" type="range" min="0" max="100" value="90" />
+      <input id="mixVol1" type="range" min="0" max="100" value="90" />
+      <input id="mixVol2" type="range" min="0" max="100" value="90" />
+      <input id="mixVol3" type="range" min="0" max="100" value="90" />
+      <span id="mixVol0Val"></span><span id="mixVol1Val"></span><span id="mixVol2Val"></span><span id="mixVol3Val"></span>
+    </div>
 
     <nav id="navMap" class="navmap" aria-label="Screens">
       <button class="navmap__btn" data-screen="S" type="button" aria-label="Song">S</button>
