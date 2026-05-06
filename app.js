@@ -514,7 +514,7 @@ function applyInstrumentToChannelAtTime(channel, instrument, time) {
   // Output (pan) is set per-trigger in triggerStep to allow CMD 'O' override.
 }
 
-function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, stepDurSec) {
+function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) {
   const ch = clamp(channel | 0, 0, 3);
   const g = channelGain(ch);
   if (!g?.gain) return;
@@ -522,27 +522,61 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, stepDurSec)
 
   const initial = clamp((clampByte(ins.env1) || 0) / 255, 0, 1);
   const fadeOut = (clampByte(ins.env2) | 0) === 0;
-  const speed = clampByte(ins.env3) / 255; // 0..1
-  const dur = clamp(stepDurSec * (0.15 + speed * 3.0), 0.01, stepDurSec * 4);
+  // ENV3 speed: low nibble (0..F) maps to 0..3s.
+  const nib = clamp((clampByte(ins.env3) & 0x0f) | 0, 0, 15);
+  const envDurRaw = (nib / 15) * 3.0; // seconds
+  const len = Number.isFinite(lengthSec) ? Math.max(0, lengthSec) : Infinity;
+  const envDur = Number.isFinite(len) ? Math.min(envDurRaw, len) : envDurRaw;
 
   try {
     if (g.gain.cancelScheduledValues) g.gain.cancelScheduledValues(time);
     if (g.gain.setValueAtTime) g.gain.setValueAtTime(initial, time);
     else g.gain.value = initial;
     const target = fadeOut ? 0 : 1;
-    if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(target, time + dur);
+    if (envDur <= 0) {
+      if (g.gain.setValueAtTime) g.gain.setValueAtTime(target, time);
+      else g.gain.value = target;
+    } else if (g.gain.linearRampToValueAtTime) {
+      g.gain.linearRampToValueAtTime(target, time + envDur);
+    }
+
+    // LENGTH gate: force to 0 at exactly the length boundary.
+    if (Number.isFinite(len) && len > 0) {
+      if (g.gain.setValueAtTime) g.gain.setValueAtTime(0, time + len);
+      else g.gain.value = 0;
+    }
   } catch {
     /* ignore */
   }
 }
 
-function lengthSecondsFromInstrument(instrument, stepDurSec) {
+function lengthSecondsFromInstrument(instrument) {
   const ins = instrument || defaultInstrumentObject(0);
   const L = clamp((ins.length ?? 0) | 0, 0, 31);
   if (L === 0x1f) return Infinity;
   if (L <= 0x00) return 0;
-  // Interpret 01..1E as 16th-note multiples (musically intuitive in a tracker).
-  return clamp(L, 1, 30) * stepDurSec;
+  // Absolute linear scale: 01..1E => 50ms..2000ms
+  const lo = 50;
+  const hi = 2000;
+  const n = clamp(L, 1, 30);
+  const t = (n - 1) / 29; // 0..1
+  const ms = lo + (hi - lo) * t;
+  return ms / 1000;
+}
+
+function releaseHeldChannelAtTime(channel, time) {
+  const ch = clamp(channel | 0, 0, 3);
+  if (!heldNoteByChannel[ch]) return;
+  const synth = channelSynth(ch);
+  if (synth && typeof synth.triggerRelease === "function") {
+    try { synth.triggerRelease(time); } catch { /* ignore */ }
+  }
+  heldNoteByChannel[ch] = false;
+}
+
+function releaseAllHeldNotes() {
+  const now = Tone.getContext()?.rawContext?.currentTime ?? 0;
+  for (let ch = 0; ch < 4; ch++) releaseHeldChannelAtTime(ch, now);
 }
 
 // Screens (LSDj-ish map)
@@ -2694,7 +2728,8 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   }
 
   // Volume envelope (ENV1/2/3) on the channel gain.
-  scheduleInstrumentEnvelopeAtTime(channel, instrument, time, stepDurSec);
+  const lenSec = lengthSecondsFromInstrument(instrument);
+  scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lenSec === Infinity ? Infinity : lenSec);
 
   // D: retrigger within the step. When note is empty and D is used on noise channel,
   // still produce a roll.
@@ -2705,9 +2740,11 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     for (let i = 0; i < count; i++) {
       const t = time + i * sub;
       if (synth === synthNoise) {
-        synth.triggerAttackRelease(sub * 0.85, t, vel);
+        const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
+        synth.triggerAttackRelease(dur, t, vel);
       } else if (step.note) {
-        synth.triggerAttackRelease(step.note, sub * 0.85, t, vel);
+        const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
+        synth.triggerAttackRelease(step.note, dur, t, vel);
       }
     }
     return;
@@ -2715,12 +2752,9 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
 
   if (synth === synthNoise) {
     // NoiseSynth: treat LENGTH like a release time when possible.
-    const lenSec = lengthSecondsFromInstrument(instrument, stepDurSec);
-    const dur = Number.isFinite(lenSec) ? Math.max(0.01, lenSec) : stepDurSec * 0.85;
+    const dur = Number.isFinite(lenSec) ? Math.max(0.01, lenSec) : 0.1;
     if (lenSec === Infinity && typeof synth.triggerAttack === "function") {
-      if (heldNoteByChannel[channel] && typeof synth.triggerRelease === "function") {
-        try { synth.triggerRelease(time); } catch { /* ignore */ }
-      }
+      releaseHeldChannelAtTime(channel, time);
       heldNoteByChannel[channel] = true;
       try { synth.triggerAttack(time, vel); } catch { synth.triggerAttack(time); }
     } else {
@@ -2733,14 +2767,10 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   if (!step.note) return;
   const baseNote = transposeSemis !== 0 ? transposeNoteBySemis(step.note, transposeSemis) : step.note;
 
-  const lenSec = lengthSecondsFromInstrument(instrument, stepDurSec);
   if (lenSec <= 0) return;
 
   // If a previous note was held (LENGTH=1F), release it before retriggering.
-  if (heldNoteByChannel[channel] && typeof synth.triggerRelease === "function") {
-    try { synth.triggerRelease(time); } catch { /* ignore */ }
-    heldNoteByChannel[channel] = false;
-  }
+  releaseHeldChannelAtTime(channel, time);
 
   if (cmd === "A") {
     const v = valByte == null ? 0x00 : clamp(valByte | 0, 0, 255);
@@ -2753,7 +2783,8 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     ];
     const sub = stepDurSec / 3;
     for (let i = 0; i < 3; i++) {
-      synth.triggerAttackRelease(notes[i], sub * 0.85, time + i * sub, vel);
+      const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
+      synth.triggerAttackRelease(notes[i], dur, time + i * sub, vel);
     }
   } else {
     if (lenSec === Infinity && typeof synth.triggerAttack === "function") {
@@ -3017,6 +3048,7 @@ function stopPlayback() {
     stepEventId = null;
   }
   Tone.Transport.stop();
+  releaseAllHeldNotes();
   playRow = -1;
   playChainRow = -1;
   playSongRow = -1;
