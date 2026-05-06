@@ -2572,24 +2572,26 @@ async function masterStart() {
   panWave = new Tone.Panner(0).connect(gainWave);
   panNoise = new Tone.Panner(0).connect(gainNoise);
 
+  // IMPORTANT: We gate notes via per-channel GainNode (instrument ENV/LENGTH),
+  // so Tone synth envelopes must not auto-decay to silence.
   synthPulse1 = new Tone.Synth({
     oscillator: { type: "pulse", width: 0.5 },
-    envelope: { attack: 0.002, decay: 0.06, sustain: 0.0, release: 0.06 },
+    envelope: { attack: 0.001, decay: 0.0, sustain: 1.0, release: 0.0 },
   }).connect(panPulse1);
 
   synthPulse2 = new Tone.Synth({
     oscillator: { type: "pulse", width: 0.5 },
-    envelope: { attack: 0.002, decay: 0.06, sustain: 0.0, release: 0.06 },
+    envelope: { attack: 0.001, decay: 0.0, sustain: 1.0, release: 0.0 },
   }).connect(panPulse2);
 
   synthWave = new Tone.Synth({
     oscillator: { type: state.wavType || "triangle" },
-    envelope: { attack: 0.002, decay: 0.08, sustain: 0.0, release: 0.08 },
+    envelope: { attack: 0.001, decay: 0.0, sustain: 1.0, release: 0.0 },
   }).connect(panWave);
 
   synthNoise = new Tone.NoiseSynth({
     noise: { type: state.noiseType || "white" },
-    envelope: { attack: 0.001, decay: 0.06, sustain: 0.0, release: 0.02 },
+    envelope: { attack: 0.001, decay: 0.0, sustain: 1.0, release: 0.0 },
   }).connect(panNoise);
 
   // Apply saved UI settings
@@ -2773,7 +2775,12 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
       try { synth.triggerAttack(time, vel); } catch { synth.triggerAttack(time); }
     } else {
       heldNoteByChannel[channel] = false;
-      synth.triggerAttackRelease(dur, time, vel);
+      if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
+        try { synth.triggerAttack(time, vel); } catch { synth.triggerAttack(time); }
+        try { synth.triggerRelease(time + dur); } catch { /* ignore */ }
+      } else {
+        synth.triggerAttackRelease(dur, time, vel);
+      }
     }
     return;
   }
@@ -2806,7 +2813,13 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
       synth.triggerAttack(baseNote, time, vel);
     } else {
       heldNoteByChannel[channel] = false;
-      synth.triggerAttackRelease(baseNote, Math.max(0.01, lenSec), time, vel);
+      const dur = Math.max(0.01, lenSec);
+      if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
+        synth.triggerAttack(baseNote, time, vel);
+        try { synth.triggerRelease(time + dur); } catch { /* ignore */ }
+      } else {
+        synth.triggerAttackRelease(baseNote, dur, time, vel);
+      }
     }
   }
 
