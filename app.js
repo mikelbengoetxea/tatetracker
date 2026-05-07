@@ -527,6 +527,18 @@ function resetChannelPitchStateAtTime(channel, time) {
   }
 }
 
+function forceChannelReleaseAtTime(channel, time) {
+  const ch = clamp(channel | 0, 0, 3);
+  const synth = channelSynth(ch);
+  if (!synth) return;
+  try {
+    if (typeof synth.triggerRelease === "function") synth.triggerRelease(time);
+  } catch {
+    /* ignore */
+  }
+  heldNoteByChannel[ch] = false;
+}
+
 function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) {
   const ch = clamp(channel | 0, 0, 3);
   const g = channelGain(ch);
@@ -2754,6 +2766,9 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   // 2) Reset pitch/table state so previous-note modulation doesn't leak.
   resetChannelPitchStateAtTime(channel, time);
 
+  // 2b) Force synth release at `time` (prevents internal voice overlap blips).
+  forceChannelReleaseAtTime(channel, time);
+
   // Apply instrument MODE immediately for this trigger.
   applyInstrumentToChannelAtTime(channel, instrument, time);
 
@@ -2833,8 +2848,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     /* ignore */
   }
 
-  // If a previous note was held (LENGTH=1F), release it before retriggering.
-  releaseHeldChannelAtTime(channel, time);
+  // Note: release already forced at trigger start for clean retrigger.
 
   if (cmd === "A") {
     const v = valByte == null ? 0x00 : clamp(valByte | 0, 0, 255);
