@@ -570,7 +570,10 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
   const g = channelGain(ch);
   if (!g?.gain) return;
   const ins = instrument || defaultInstrumentObject(0);
-  const lookAheadSec = 0.01;
+  // Hold gate closed long enough for pitch/mode/pan to settle,
+  // then open smoothly to avoid transients being perceived as “pitch blips”.
+  const lookAheadSec = 0.02;
+  const openRampSec = 0.01;
 
   // ENV1/2/3 are nibbles in Instrument View.
   const env1 = clamp((ins.env1 ?? 0) | 0, 0, 0x0f);
@@ -585,27 +588,30 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
   const envDur = Number.isFinite(len) ? Math.min(envDurRaw, len) : envDurRaw;
   const floor = 0.0001;
   const t0 = time + lookAheadSec;
+  const tOpen = t0 + openRampSec;
 
   try {
     // Start from silence, then begin envelope after a tiny look-ahead.
     // (The channel is also muted at triggerStep start; this reinforces it.)
     if (g.gain.cancelScheduledValues) g.gain.cancelScheduledValues(time);
     if (g.gain.setValueAtTime) g.gain.setValueAtTime(0, time);
+    // Pin at 0 through the full settle window.
+    if (g.gain.setValueAtTime) g.gain.setValueAtTime(0, t0);
     const start = Math.max(floor, initial);
     // Smoothly open gate so any parameter changes settle.
-    if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(start, t0);
-    else if (g.gain.setValueAtTime) g.gain.setValueAtTime(start, t0);
+    if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(start, tOpen);
+    else if (g.gain.setValueAtTime) g.gain.setValueAtTime(start, tOpen);
     else g.gain.value = start;
 
     // ENV2: 0 = Decay (to 0). 1 = Sustain/Rise (hold, or slight up-ramp).
     // ENV3: 0 = no ramp (constant volume).
     if (envDur > 0) {
       if (fadeOut) {
-        if (g.gain.exponentialRampToValueAtTime) g.gain.exponentialRampToValueAtTime(floor, t0 + envDur);
-        else if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(0, t0 + envDur);
+        if (g.gain.exponentialRampToValueAtTime) g.gain.exponentialRampToValueAtTime(floor, tOpen + envDur);
+        else if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(0, tOpen + envDur);
       } else {
         const upTarget = clamp(start + 0.08, floor, 1);
-        if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(upTarget, t0 + envDur);
+        if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(upTarget, tOpen + envDur);
       }
     }
 
@@ -2847,6 +2853,8 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   try {
     const freq = Tone.Frequency(baseNote).toFrequency();
     if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, safeTime);
+    // Re-assert at +lookAhead to avoid any internal smoothing oddities.
+    if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, safeTime + 0.02);
   } catch {
     /* ignore */
   }
