@@ -2754,9 +2754,11 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
 
   // Clean Trigger sequence:
   // 1) Immediate mute at the exact event time (kills lingering previous audio).
+  const pitchSetTime = Math.max(0, time - 0.001);
   const g = channelGain(channel);
   try {
-    if (g?.gain?.cancelScheduledValues) g.gain.cancelScheduledValues(time);
+    if (g?.gain?.cancelScheduledValues) g.gain.cancelScheduledValues(pitchSetTime);
+    if (g?.gain?.setValueAtTime) g.gain.setValueAtTime(0, pitchSetTime);
     if (g?.gain?.setValueAtTime) g.gain.setValueAtTime(0, time);
     else if (g?.gain?.value != null) g.gain.value = 0;
   } catch {
@@ -2764,10 +2766,10 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   }
 
   // 2) Reset pitch/table state so previous-note modulation doesn't leak.
-  resetChannelPitchStateAtTime(channel, time);
+  resetChannelPitchStateAtTime(channel, pitchSetTime);
 
   // 2b) Force synth release at `time` (prevents internal voice overlap blips).
-  forceChannelReleaseAtTime(channel, time);
+  forceChannelReleaseAtTime(channel, pitchSetTime);
 
   // Apply instrument MODE immediately for this trigger.
   applyInstrumentToChannelAtTime(channel, instrument, time);
@@ -2807,10 +2809,20 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
       const t = time + i * sub;
       if (synth === synthNoise) {
         const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
-        synth.triggerAttackRelease(dur, t, vel);
+        if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
+          try { synth.triggerAttack(t, vel); } catch { synth.triggerAttack(t); }
+          try { synth.triggerRelease(t + dur); } catch { /* ignore */ }
+        } else {
+          synth.triggerAttackRelease(dur, t, vel);
+        }
       } else if (step.note) {
         const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
-        synth.triggerAttackRelease(step.note, dur, t, vel);
+        if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
+          synth.triggerAttack(step.note, t, vel);
+          try { synth.triggerRelease(t + dur); } catch { /* ignore */ }
+        } else {
+          synth.triggerAttackRelease(step.note, dur, t, vel);
+        }
       }
     }
     return;
@@ -2843,7 +2855,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   // 3) Pitch first: set oscillator frequency at the event time so the envelope comes up on the correct pitch.
   try {
     const freq = Tone.Frequency(baseNote).toFrequency();
-    if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, time);
+    if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, pitchSetTime);
   } catch {
     /* ignore */
   }
@@ -2862,7 +2874,13 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     const sub = stepDurSec / 3;
     for (let i = 0; i < 3; i++) {
       const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
-      synth.triggerAttackRelease(notes[i], dur, time + i * sub, vel);
+      const t = time + i * sub;
+      if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
+        synth.triggerAttack(notes[i], t, vel);
+        try { synth.triggerRelease(t + dur); } catch { /* ignore */ }
+      } else {
+        synth.triggerAttackRelease(notes[i], dur, t, vel);
+      }
     }
   } else {
     if (lenSec === Infinity && typeof synth.triggerAttack === "function") {
