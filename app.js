@@ -429,10 +429,10 @@ const elCellMenuSelect = document.getElementById("cellMenuSelect");
 
 // Audio
 let engineReady = false;
-let synthPulse1 = null;
-let synthPulse2 = null;
-let synthWave = null;
-let synthNoise = null;
+let synthPulse1 = null; // Tone.PulseOscillator
+let synthPulse2 = null; // Tone.PulseOscillator
+let synthWave = null; // Tone.Oscillator
+let synthNoise = null; // Tone.Noise
 let panPulse1 = null;
 let panPulse2 = null;
 let panWave = null;
@@ -522,6 +522,7 @@ function resetChannelPitchStateAtTime(channel, time) {
     if (synth.detune?.cancelScheduledValues) synth.detune.cancelScheduledValues(time);
     if (synth.detune?.setValueAtTime) synth.detune.setValueAtTime(0, time);
     else if (synth.detune?.value != null) synth.detune.value = 0;
+    if (synth.frequency?.cancelScheduledValues) synth.frequency.cancelScheduledValues(time);
   } catch {
     /* ignore */
   }
@@ -532,7 +533,8 @@ function forceChannelReleaseAtTime(channel, time) {
   const synth = channelSynth(ch);
   if (!synth) return;
   try {
-    if (typeof synth.triggerRelease === "function") synth.triggerRelease(time);
+    // With always-running oscillators/noise, there is no synth envelope to release.
+    // Gating is handled by the per-channel GainNode.
   } catch {
     /* ignore */
   }
@@ -615,10 +617,7 @@ function lengthSecondsFromInstrument(instrument) {
 function releaseHeldChannelAtTime(channel, time) {
   const ch = clamp(channel | 0, 0, 3);
   if (!heldNoteByChannel[ch]) return;
-  const synth = channelSynth(ch);
-  if (synth && typeof synth.triggerRelease === "function") {
-    try { synth.triggerRelease(time); } catch { /* ignore */ }
-  }
+  // Always-running sources: gate is handled by the GainNode.
   heldNoteByChannel[ch] = false;
 }
 
@@ -2581,12 +2580,8 @@ function applyPulseWidth(which, pct) {
   const p = clamp(Number(pct) || 50, 5, 95) / 100;
   const synth = which === 1 ? synthPulse1 : synthPulse2;
   if (!synth) return;
-
-  // Tone.js pulse width is exposed differently depending on oscillator class.
-  // We try a few compatible paths.
-  const osc = synth.oscillator;
-  if (osc?.width?.value != null) osc.width.value = p;
-  if (osc?.width != null && typeof osc.width === "number") osc.width = p;
+  if (synth?.width?.value != null) synth.width.value = p;
+  if (synth?.width != null && typeof synth.width === "number") synth.width = p;
 }
 
 async function masterStart() {
@@ -2605,27 +2600,16 @@ async function masterStart() {
   panWave = new Tone.Panner(0).connect(gainWave);
   panNoise = new Tone.Panner(0).connect(gainNoise);
 
-  // IMPORTANT: We gate notes via per-channel GainNode (instrument ENV/LENGTH),
-  // so Tone synth envelopes must not auto-decay to silence.
-  synthPulse1 = new Tone.Synth({
-    oscillator: { type: "pulse", width: 0.5 },
-    envelope: { attack: 0.001, decay: 0.0, sustain: 1.0, release: 0.0 },
-  }).connect(panPulse1);
-
-  synthPulse2 = new Tone.Synth({
-    oscillator: { type: "pulse", width: 0.5 },
-    envelope: { attack: 0.001, decay: 0.0, sustain: 1.0, release: 0.0 },
-  }).connect(panPulse2);
-
-  synthWave = new Tone.Synth({
-    oscillator: { type: state.wavType || "triangle" },
-    envelope: { attack: 0.001, decay: 0.0, sustain: 1.0, release: 0.0 },
-  }).connect(panWave);
-
-  synthNoise = new Tone.NoiseSynth({
-    noise: { type: state.noiseType || "white" },
-    envelope: { attack: 0.001, decay: 0.0, sustain: 1.0, release: 0.0 },
-  }).connect(panNoise);
+  // IMPORTANT: Use always-running sources and gate via per-channel GainNode only.
+  // This avoids any Tone.Synth internal retrigger pitch artifacts (“blips”).
+  synthPulse1 = new Tone.PulseOscillator({ frequency: 440, width: 0.25 }).connect(panPulse1);
+  synthPulse2 = new Tone.PulseOscillator({ frequency: 440, width: 0.25 }).connect(panPulse2);
+  synthWave = new Tone.Oscillator({ frequency: 440, type: state.wavType || "triangle" }).connect(panWave);
+  synthNoise = new Tone.Noise({ type: state.noiseType || "white" }).connect(panNoise);
+  synthPulse1.start();
+  synthPulse2.start();
+  synthWave.start();
+  synthNoise.start();
 
   // Apply saved UI settings
   Tone.Transport.bpm.value = state.bpm;
@@ -2640,11 +2624,11 @@ async function masterStart() {
 
 function applyInstrumentSettingsFromState() {
   // WAV / NOI
-  if (synthWave?.oscillator?.type != null && typeof state.wavType === "string") {
-    synthWave.oscillator.type = state.wavType;
+  if (synthWave?.type != null && typeof state.wavType === "string") {
+    try { synthWave.type = state.wavType; } catch { /* ignore */ }
   }
-  if (synthNoise?.noise?.type != null && typeof state.noiseType === "string") {
-    synthNoise.noise.type = state.noiseType;
+  if (synthNoise?.type != null && typeof state.noiseType === "string") {
+    try { synthNoise.type = state.noiseType; } catch { /* ignore */ }
   }
 
   // Mixer (0..100 -> 0..1)
@@ -2706,12 +2690,13 @@ function widthFromByte(valByte) {
   return 0.75;
 }
 
-function applyPulseWidthAtTime(synth, width, time) {
-  if (!synth?.oscillator) return;
-  const osc = synth.oscillator;
-  if (osc?.width?.setValueAtTime) osc.width.setValueAtTime(width, time);
-  else if (osc?.width?.value != null) osc.width.value = width;
-  else if (osc?.width != null && typeof osc.width === "number") osc.width = width;
+function applyPulseWidthAtTime(osc, width, time) {
+  if (!osc) return;
+  const w = clamp(Number(width) || 0.5, 0.01, 0.99);
+  // Tone.PulseOscillator exposes width as a Signal.
+  if (osc?.width?.setValueAtTime) osc.width.setValueAtTime(w, time);
+  else if (osc?.width?.value != null) osc.width.value = w;
+  else if (osc?.width != null && typeof osc.width === "number") osc.width = w;
 }
 
 function transposeNoteBySemis(note, semis) {
@@ -2807,43 +2792,23 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     const sub = stepDurSec / count;
     for (let i = 0; i < count; i++) {
       const t = time + i * sub;
-      if (synth === synthNoise) {
-        const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
-        if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
-          try { synth.triggerAttack(t, vel); } catch { synth.triggerAttack(t); }
-          try { synth.triggerRelease(t + dur); } catch { /* ignore */ }
-        } else {
-          synth.triggerAttackRelease(dur, t, vel);
+      const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
+      // Simulate retrigger by pulsing the channel gain (sources are always running).
+      try {
+        if (g?.gain?.setValueAtTime) {
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(1, t + Math.min(0.002, dur));
+          g.gain.setValueAtTime(0, t + dur);
         }
-      } else if (step.note) {
-        const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
-        if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
-          synth.triggerAttack(step.note, t, vel);
-          try { synth.triggerRelease(t + dur); } catch { /* ignore */ }
-        } else {
-          synth.triggerAttackRelease(step.note, dur, t, vel);
-        }
-      }
+      } catch { /* ignore */ }
     }
     return;
   }
 
   if (synth === synthNoise) {
-    // NoiseSynth: treat LENGTH like a release time when possible.
-    const dur = Number.isFinite(lenSec) ? Math.max(0.01, lenSec) : 0.1;
-    if (lenSec === Infinity && typeof synth.triggerAttack === "function") {
-      releaseHeldChannelAtTime(channel, time);
-      heldNoteByChannel[channel] = true;
-      try { synth.triggerAttack(time, vel); } catch { synth.triggerAttack(time); }
-    } else {
-      heldNoteByChannel[channel] = false;
-      if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
-        try { synth.triggerAttack(time, vel); } catch { synth.triggerAttack(time); }
-        try { synth.triggerRelease(time + dur); } catch { /* ignore */ }
-      } else {
-        synth.triggerAttackRelease(dur, time, vel);
-      }
-    }
+    // Noise source is always running; gating is via GainNode only.
+    if (lenSec === Infinity) heldNoteByChannel[channel] = true;
+    else heldNoteByChannel[channel] = false;
     return;
   }
 
@@ -2875,27 +2840,22 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     for (let i = 0; i < 3; i++) {
       const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
       const t = time + i * sub;
-      if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
-        synth.triggerAttack(notes[i], t, vel);
-        try { synth.triggerRelease(t + dur); } catch { /* ignore */ }
-      } else {
-        synth.triggerAttackRelease(notes[i], dur, t, vel);
-      }
+      // Arp: schedule frequency changes; gain envelope already handles loudness.
+      try {
+        const freq = Tone.Frequency(notes[i]).toFrequency();
+        if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, t);
+      } catch { /* ignore */ }
+      // Optional: small gate pulse for separation
+      try {
+        if (g?.gain?.setValueAtTime) {
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(1, t + Math.min(0.002, dur));
+        }
+      } catch { /* ignore */ }
     }
   } else {
-    if (lenSec === Infinity && typeof synth.triggerAttack === "function") {
-      heldNoteByChannel[channel] = true;
-      synth.triggerAttack(baseNote, time, vel);
-    } else {
-      heldNoteByChannel[channel] = false;
-      const dur = Math.max(0.01, lenSec);
-      if (typeof synth.triggerAttack === "function" && typeof synth.triggerRelease === "function") {
-        synth.triggerAttack(baseNote, time, vel);
-        try { synth.triggerRelease(time + dur); } catch { /* ignore */ }
-      } else {
-        synth.triggerAttackRelease(baseNote, dur, time, vel);
-      }
-    }
+    // Normal note: schedule frequency, let gain envelope/LENGTH do the gate.
+    heldNoteByChannel[channel] = lenSec === Infinity;
   }
 
   // P: pitch slide in cents over the step duration, then reset.
