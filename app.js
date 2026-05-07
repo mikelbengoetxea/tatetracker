@@ -514,11 +514,25 @@ function applyInstrumentToChannelAtTime(channel, instrument, time) {
   // Output (pan) is set per-trigger in triggerStep to allow CMD 'O' override.
 }
 
+function resetChannelPitchStateAtTime(channel, time) {
+  const ch = clamp(channel | 0, 0, 3);
+  const synth = channelSynth(ch);
+  if (!synth) return;
+  try {
+    if (synth.detune?.cancelScheduledValues) synth.detune.cancelScheduledValues(time);
+    if (synth.detune?.setValueAtTime) synth.detune.setValueAtTime(0, time);
+    else if (synth.detune?.value != null) synth.detune.value = 0;
+  } catch {
+    /* ignore */
+  }
+}
+
 function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) {
   const ch = clamp(channel | 0, 0, 3);
   const g = channelGain(ch);
   if (!g?.gain) return;
   const ins = instrument || defaultInstrumentObject(0);
+  const lookAheadSec = 0.002;
 
   // ENV1/2/3 are nibbles in Instrument View.
   const env1 = clamp((ins.env1 ?? 0) | 0, 0, 0x0f);
@@ -532,22 +546,26 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
   const len = Number.isFinite(lengthSec) ? Math.max(0, lengthSec) : Infinity;
   const envDur = Number.isFinite(len) ? Math.min(envDurRaw, len) : envDurRaw;
   const floor = 0.0001;
+  const t0 = time + lookAheadSec;
 
   try {
+    // Start from silence, then begin envelope after a tiny look-ahead.
+    // (The channel is also muted at triggerStep start; this reinforces it.)
     if (g.gain.cancelScheduledValues) g.gain.cancelScheduledValues(time);
+    if (g.gain.setValueAtTime) g.gain.setValueAtTime(0, time);
     const start = Math.max(floor, initial);
-    if (g.gain.setValueAtTime) g.gain.setValueAtTime(start, time);
+    if (g.gain.setValueAtTime) g.gain.setValueAtTime(start, t0);
     else g.gain.value = start;
 
     // ENV2: 0 = Decay (to 0). 1 = Sustain/Rise (hold, or slight up-ramp).
     // ENV3: 0 = no ramp (constant volume).
     if (envDur > 0) {
       if (fadeOut) {
-        if (g.gain.exponentialRampToValueAtTime) g.gain.exponentialRampToValueAtTime(floor, time + envDur);
-        else if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(0, time + envDur);
+        if (g.gain.exponentialRampToValueAtTime) g.gain.exponentialRampToValueAtTime(floor, t0 + envDur);
+        else if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(0, t0 + envDur);
       } else {
         const upTarget = clamp(start + 0.08, floor, 1);
-        if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(upTarget, time + envDur);
+        if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(upTarget, t0 + envDur);
       }
     }
 
@@ -2722,6 +2740,20 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     channel === 2 ? panWave :
     panNoise;
 
+  // Clean Trigger sequence:
+  // 1) Immediate mute at the exact event time (kills lingering previous audio).
+  const g = channelGain(channel);
+  try {
+    if (g?.gain?.cancelScheduledValues) g.gain.cancelScheduledValues(time);
+    if (g?.gain?.setValueAtTime) g.gain.setValueAtTime(0, time);
+    else if (g?.gain?.value != null) g.gain.value = 0;
+  } catch {
+    /* ignore */
+  }
+
+  // 2) Reset pitch/table state so previous-note modulation doesn't leak.
+  resetChannelPitchStateAtTime(channel, time);
+
   // Apply instrument MODE immediately for this trigger.
   applyInstrumentToChannelAtTime(channel, instrument, time);
 
@@ -2792,6 +2824,14 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   const baseNote = transposeSemis !== 0 ? transposeNoteBySemis(step.note, transposeSemis) : step.note;
 
   if (lenSec <= 0) return;
+
+  // 3) Pitch first: set oscillator frequency at the event time so the envelope comes up on the correct pitch.
+  try {
+    const freq = Tone.Frequency(baseNote).toFrequency();
+    if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, time);
+  } catch {
+    /* ignore */
+  }
 
   // If a previous note was held (LENGTH=1F), release it before retriggering.
   releaseHeldChannelAtTime(channel, time);
