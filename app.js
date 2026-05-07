@@ -472,6 +472,24 @@ function channelSynth(ch) {
   return ch === 0 ? synthPulse1 : ch === 1 ? synthPulse2 : ch === 2 ? synthWave : synthNoise;
 }
 
+function hardMuteGateAtTime(gate, time) {
+  if (!gate?.gain) return;
+  try {
+    if (gate.gain.cancelScheduledValues) gate.gain.cancelScheduledValues(time);
+    if (gate.gain.setValueAtTime) gate.gain.setValueAtTime(0, time);
+    else if (gate.gain.value != null) gate.gain.value = 0;
+  } catch {
+    /* ignore */
+  }
+}
+
+function hardMuteAllGatesAtTime(time) {
+  hardMuteGateAtTime(gatePulse1, time);
+  hardMuteGateAtTime(gatePulse2, time);
+  hardMuteGateAtTime(gateWave, time);
+  hardMuteGateAtTime(gateNoise, time);
+}
+
 function panFromOutput(output) {
   const o = clamp((output ?? 0) | 0, 0, 2);
   if (o === 1) return -1;
@@ -2749,24 +2767,18 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     channel === 2 ? panWave :
     panNoise;
 
-  // Clean Trigger sequence:
-  // 1) Immediate mute at the exact event time (kills lingering previous audio).
-  const pitchSetTime = Math.max(0, time - 0.001);
+  // Clean Trigger sequence (timing-hardened):
+  // Some callbacks arrive extremely close to `audioContext.currentTime`, so NEVER schedule in the past.
+  const now = Tone.getContext()?.rawContext?.currentTime ?? time;
+  const safeTime = Math.max(time, now + 0.004); // safety margin to avoid “near-now” reordering artifacts
   const g = channelGain(channel);
-  try {
-    if (g?.gain?.cancelScheduledValues) g.gain.cancelScheduledValues(pitchSetTime);
-    if (g?.gain?.setValueAtTime) g.gain.setValueAtTime(0, pitchSetTime);
-    if (g?.gain?.setValueAtTime) g.gain.setValueAtTime(0, time);
-    else if (g?.gain?.value != null) g.gain.value = 0;
-  } catch {
-    /* ignore */
-  }
 
-  // 2) Reset pitch/table state so previous-note modulation doesn't leak.
-  resetChannelPitchStateAtTime(channel, pitchSetTime);
+  // 1) Immediate mute at safeTime (kills lingering previous audio).
+  hardMuteGateAtTime(g, safeTime);
 
-  // 2b) Force synth release at `time` (prevents internal voice overlap blips).
-  forceChannelReleaseAtTime(channel, pitchSetTime);
+  // 2) Reset pitch/table state before we open the envelope.
+  resetChannelPitchStateAtTime(channel, safeTime);
+  forceChannelReleaseAtTime(channel, safeTime);
 
   // Apply instrument MODE immediately for this trigger.
   applyInstrumentToChannelAtTime(channel, instrument, time);
@@ -2794,7 +2806,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
 
   // Volume envelope (ENV1/2/3) on the channel gain.
   const lenSec = lengthSecondsFromInstrument(instrument);
-  scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lenSec === Infinity ? Infinity : lenSec);
+  scheduleInstrumentEnvelopeAtTime(channel, instrument, safeTime, lenSec === Infinity ? Infinity : lenSec);
 
   // D: retrigger within the step. When note is empty and D is used on noise channel,
   // still produce a roll.
@@ -2832,7 +2844,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   // 3) Pitch first: set oscillator frequency at the event time so the envelope comes up on the correct pitch.
   try {
     const freq = Tone.Frequency(baseNote).toFrequency();
-    if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, pitchSetTime);
+    if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, safeTime);
   } catch {
     /* ignore */
   }
@@ -3123,6 +3135,9 @@ function stopPlayback() {
   }
   Tone.Transport.stop();
   releaseAllHeldNotes();
+  // Prevent “frozen” sustained notes (ENV2=1, LENGTH=1F) after pause/stop.
+  const now = Tone.getContext()?.rawContext?.currentTime ?? 0;
+  hardMuteAllGatesAtTime(now);
   playRow = -1;
   playChainRow = -1;
   playSongRow = -1;
