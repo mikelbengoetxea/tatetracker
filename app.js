@@ -437,10 +437,16 @@ let panPulse1 = null;
 let panPulse2 = null;
 let panWave = null;
 let panNoise = null;
+// Mixer gain (controlled by mixVol)
 let gainPulse1 = null;
 let gainPulse2 = null;
 let gainWave = null;
 let gainNoise = null;
+// Gate gain (controlled by instrument ENV/LENGTH)
+let gatePulse1 = null;
+let gatePulse2 = null;
+let gateWave = null;
+let gateNoise = null;
 let master = null;
 let stepEventId = null;
 
@@ -460,7 +466,7 @@ function channelPanner(ch) {
   return ch === 0 ? panPulse1 : ch === 1 ? panPulse2 : ch === 2 ? panWave : panNoise;
 }
 function channelGain(ch) {
-  return ch === 0 ? gainPulse1 : ch === 1 ? gainPulse2 : ch === 2 ? gainWave : gainNoise;
+  return ch === 0 ? gatePulse1 : ch === 1 ? gatePulse2 : ch === 2 ? gateWave : gateNoise;
 }
 function channelSynth(ch) {
   return ch === 0 ? synthPulse1 : ch === 1 ? synthPulse2 : ch === 2 ? synthWave : synthNoise;
@@ -2595,10 +2601,16 @@ async function masterStart() {
   gainWave = new Tone.Gain(0.9).connect(master);
   gainNoise = new Tone.Gain(0.9).connect(master);
 
-  panPulse1 = new Tone.Panner(0).connect(gainPulse1);
-  panPulse2 = new Tone.Panner(0).connect(gainPulse2);
-  panWave = new Tone.Panner(0).connect(gainWave);
-  panNoise = new Tone.Panner(0).connect(gainNoise);
+  // Gate nodes start at 0 so always-running sources are silent until sequenced.
+  gatePulse1 = new Tone.Gain(0).connect(gainPulse1);
+  gatePulse2 = new Tone.Gain(0).connect(gainPulse2);
+  gateWave = new Tone.Gain(0).connect(gainWave);
+  gateNoise = new Tone.Gain(0).connect(gainNoise);
+
+  panPulse1 = new Tone.Panner(0).connect(gatePulse1);
+  panPulse2 = new Tone.Panner(0).connect(gatePulse2);
+  panWave = new Tone.Panner(0).connect(gateWave);
+  panNoise = new Tone.Panner(0).connect(gateNoise);
 
   // IMPORTANT: Use always-running sources and gate via per-channel GainNode only.
   // This avoids any Tone.Synth internal retrigger pitch artifacts (“blips”).
