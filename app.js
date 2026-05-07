@@ -66,8 +66,8 @@ function defaultInstrumentObject(index) {
     type: 0,
     mode: 0x01,
     env1: 0x0a,
-    env2: 0x01,
-    env3: 0x00,
+    env2: 0x00,
+    env3: 0x05,
     output: 0x00,
     length: 0x1f,
     tablePreset: 0,
@@ -81,9 +81,9 @@ function normalizeInstrumentObject(index, raw) {
   o.name = instrumentDefaultName(index);
   o.type = clamp(Number(o.type) || 0, 0, 2);
   o.mode = clamp(Number(o.mode) || 0, 0, 3);
-  o.env1 = clampByte(o.env1 ?? base.env1);
-  o.env2 = clampByte(o.env2 ?? base.env2);
-  o.env3 = clampByte(o.env3 ?? base.env3);
+  o.env1 = clamp((Number(o.env1) || 0) | 0, 0, 0x0f);
+  o.env2 = clamp((Number(o.env2) || 0) | 0, 0, 0x01);
+  o.env3 = clamp((Number(o.env3) || 0) | 0, 0, 0x0f);
   o.output = clamp(Number(o.output) || 0, 0, 2);
   o.length = clamp(Number(o.length) || 0, 0, 31);
   o.tablePreset = clamp(Number(o.tablePreset) || 0, 0, 11);
@@ -520,10 +520,14 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
   if (!g?.gain) return;
   const ins = instrument || defaultInstrumentObject(0);
 
-  const initial = clamp((clampByte(ins.env1) || 0) / 255, 0, 1);
-  const fadeOut = (clampByte(ins.env2) | 0) === 0;
-  // ENV3 speed: low nibble (0..F) maps to 0..3s.
-  const nib = clamp((clampByte(ins.env3) & 0x0f) | 0, 0, 15);
+  // ENV1/2/3 are nibbles in Instrument View.
+  const env1 = clamp((ins.env1 ?? 0) | 0, 0, 0x0f);
+  const env2 = clamp((ins.env2 ?? 0) | 0, 0, 0x01);
+  const env3 = clamp((ins.env3 ?? 0) | 0, 0, 0x0f);
+  const initial = clamp(env1 / 15, 0, 1);
+  const fadeOut = env2 === 0;
+  // ENV3 speed: 0..F maps to 0..3s.
+  const nib = env3;
   const envDurRaw = (nib / 15) * 3.0; // seconds
   const len = Number.isFinite(lengthSec) ? Math.max(0, lengthSec) : Infinity;
   const envDur = Number.isFinite(len) ? Math.min(envDurRaw, len) : envDurRaw;
@@ -535,8 +539,8 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
     if (g.gain.setValueAtTime) g.gain.setValueAtTime(start, time);
     else g.gain.value = start;
 
-    // ENV2: 0 = Down (to 0). >0 = Up/Stay (hold, or slight up-ramp).
-    // ENV3: 0 = no ramp.
+    // ENV2: 0 = Decay (to 0). 1 = Sustain/Rise (hold, or slight up-ramp).
+    // ENV3: 0 = no ramp (constant volume).
     if (envDur > 0) {
       if (fadeOut) {
         if (g.gain.exponentialRampToValueAtTime) g.gain.exponentialRampToValueAtTime(floor, time + envDur);
@@ -1456,9 +1460,9 @@ function instrumentStatusForRow(paramRow) {
   if (!ins) return "--";
   if (pr === 1) return `Type: ${INSTRUMENT_TYPE_LABELS[clamp(ins.type, 0, 2)]}`;
   if (pr === 2) return `Mode: ${modeLabelForTypeAndMode(ins.type, ins.mode)}`;
-  if (pr === 3) return `Initial Volume: ${toHex2(clampByte(ins.env1))}`;
-  if (pr === 4) return `Env Direction: ${(ins.env2 & 0x80) !== 0 ? "Down" : "Up"}`;
-  if (pr === 5) return `Env Speed/Length: ${toHex2(clampByte(ins.env3))}`;
+  if (pr === 3) return `Initial Volume: ${toHex2(clamp(ins.env1 | 0, 0, 0x0f))}`;
+  if (pr === 4) return `Decay (${clamp(ins.env2 | 0, 0, 1)})`;
+  if (pr === 5) return `Env Speed: ${toHex2(clamp(ins.env3 | 0, 0, 0x0f))}`;
   if (pr === 6) {
     const L = clamp(ins.length | 0, 0, 31);
     return L === 0x1f ? "Note Length: Unlimited" : `Note Length: ${toHex2(L)}`;
@@ -1478,9 +1482,9 @@ function setInstrumentParamFromRaw(paramRow, raw) {
   const ins = state.instruments[instrumentTargetIndex];
   if (pr === 1) ins.type = clamp(v, 0, 2);
   else if (pr === 2) ins.mode = clamp(v, 0, 3);
-  else if (pr === 3) ins.env1 = clampByte(v);
-  else if (pr === 4) ins.env2 = clampByte(v);
-  else if (pr === 5) ins.env3 = clampByte(v);
+  else if (pr === 3) ins.env1 = clamp(v, 0, 0x0f);
+  else if (pr === 4) ins.env2 = clamp(v, 0, 0x01);
+  else if (pr === 5) ins.env3 = clamp(v, 0, 0x0f);
   else if (pr === 6) ins.length = clamp(v, 0, 31);
   else if (pr === 7) ins.output = clamp(v, 0, 2);
   else ins.tablePreset = clamp(v, 0, 11);
@@ -1517,14 +1521,13 @@ function applyNudgeToInstrumentParam(paramRow, action, isRandom) {
     if (isRandom) ins.tablePreset = randomInt(0, 11);
     else ins.tablePreset = clamp(ins.tablePreset + sign * (isJump ? 4 : 1), 0, 11);
   } else {
-    const b = clampByte(cur);
     if (isRandom) {
-      if (pr === 3) ins.env1 = randomInt(0, 255);
-      else if (pr === 4) ins.env2 = randomInt(0, 255);
-      else ins.env3 = randomInt(0, 255);
-    } else if (pr === 3) ins.env1 = clampByte(b + sign * step);
-    else if (pr === 4) ins.env2 = clampByte(b + sign * step);
-    else ins.env3 = clampByte(b + sign * step);
+      if (pr === 3) ins.env1 = randomInt(0, 0x0f);
+      else if (pr === 4) ins.env2 = randomInt(0, 0x01);
+      else ins.env3 = randomInt(0, 0x0f);
+    } else if (pr === 3) ins.env1 = clamp((ins.env1 | 0) + sign * 1, 0, 0x0f);
+    else if (pr === 4) ins.env2 = clamp((ins.env2 | 0) + sign * 1, 0, 0x01);
+    else ins.env3 = clamp((ins.env3 | 0) + sign * 1, 0, 0x0f);
   }
   ins.name = instrumentDefaultName(instrumentTargetIndex);
   applyLiveInstrumentUpdateForId(instrumentTargetIndex);
