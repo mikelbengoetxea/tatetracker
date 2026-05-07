@@ -570,7 +570,7 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
   const g = channelGain(ch);
   if (!g?.gain) return;
   const ins = instrument || defaultInstrumentObject(0);
-  const lookAheadSec = 0.002;
+  const lookAheadSec = 0.01;
 
   // ENV1/2/3 are nibbles in Instrument View.
   const env1 = clamp((ins.env1 ?? 0) | 0, 0, 0x0f);
@@ -592,7 +592,9 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
     if (g.gain.cancelScheduledValues) g.gain.cancelScheduledValues(time);
     if (g.gain.setValueAtTime) g.gain.setValueAtTime(0, time);
     const start = Math.max(floor, initial);
-    if (g.gain.setValueAtTime) g.gain.setValueAtTime(start, t0);
+    // Smoothly open gate so any parameter changes settle.
+    if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(start, t0);
+    else if (g.gain.setValueAtTime) g.gain.setValueAtTime(start, t0);
     else g.gain.value = start;
 
     // ENV2: 0 = Decay (to 0). 1 = Sustain/Rise (hold, or slight up-ramp).
@@ -2781,19 +2783,19 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   forceChannelReleaseAtTime(channel, safeTime);
 
   // Apply instrument MODE immediately for this trigger.
-  applyInstrumentToChannelAtTime(channel, instrument, time);
+  applyInstrumentToChannelAtTime(channel, instrument, safeTime);
 
   // Output pan: instrument default unless CMD 'O' explicitly sets it.
   const nextPan = cmd === "O" ? panFromByte(valByte) : panFromOutput(instrument.output);
   if (panner?.pan?.setValueAtTime) {
-    panner.pan.setValueAtTime(nextPan, time);
+    panner.pan.setValueAtTime(nextPan, safeTime);
   } else if (panner?.pan?.value != null) {
     panner.pan.value = nextPan;
   }
 
   if (cmd === "W" && (channel === 0 || channel === 1)) {
     const w = widthFromByte(valByte);
-    applyPulseWidthAtTime(channel === 0 ? synthPulse1 : synthPulse2, w, time);
+    applyPulseWidthAtTime(channel === 0 ? synthPulse1 : synthPulse2, w, safeTime);
   }
 
   if (cmd === "T") {
@@ -2886,9 +2888,9 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   if (cmd === "P" && semis !== 0) {
     const detuneCents = semis * 100;
     if (synth.detune?.value != null) {
-      synth.detune.setValueAtTime(0, time);
-      synth.detune.linearRampToValueAtTime(detuneCents, time + stepDurSec * 0.9);
-      synth.detune.setValueAtTime(0, time + stepDurSec);
+      synth.detune.setValueAtTime(0, safeTime);
+      synth.detune.linearRampToValueAtTime(detuneCents, safeTime + stepDurSec * 0.9);
+      synth.detune.setValueAtTime(0, safeTime + stepDurSec);
     }
   }
 }
