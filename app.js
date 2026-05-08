@@ -2,6 +2,113 @@
 
 const STORAGE_KEY = "tate-tracker:v1";
 
+// Audio debug: defaults ON (throttled). You can still disable with `window.DEBUG_AUDIO = false`.
+const AUDIO_DEBUG_DEFAULT = true;
+let audioDebugLastLogAt = 0;
+let audioDebugBurst = 0;
+let audioDebugLines = [];
+let elAudioDebug = null;
+let elAudioDebugCopyBtn = null;
+function ensureAudioDebugOverlay() {
+  try {
+    if (elAudioDebug && document.body.contains(elAudioDebug)) return elAudioDebug;
+    elAudioDebug = document.getElementById("audioDebugOverlay");
+    if (elAudioDebug) return elAudioDebug;
+    const pre = document.createElement("pre");
+    pre.id = "audioDebugOverlay";
+    pre.style.position = "fixed";
+    pre.style.left = "8px";
+    pre.style.right = "8px";
+    pre.style.bottom = "76px";
+    pre.style.maxHeight = "40vh";
+    pre.style.overflow = "auto";
+    pre.style.padding = "10px 12px";
+    pre.style.margin = "0";
+    pre.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+    pre.style.fontSize = "11px";
+    pre.style.lineHeight = "1.35";
+    pre.style.border = "1px solid rgba(103,232,249,0.25)";
+    pre.style.borderRadius = "10px";
+    pre.style.background = "rgba(7, 9, 12, 0.88)";
+    pre.style.color = "#c7fbff";
+    pre.style.zIndex = "9999";
+    pre.style.whiteSpace = "pre-wrap";
+    pre.style.pointerEvents = "auto";
+    document.body.appendChild(pre);
+    elAudioDebug = pre;
+
+    // Copy button
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Copy audio logs";
+    btn.style.position = "fixed";
+    btn.style.right = "12px";
+    btn.style.bottom = "calc(76px + 40vh + 10px)";
+    btn.style.zIndex = "10000";
+    btn.style.padding = "8px 10px";
+    btn.style.fontFamily = "inherit";
+    btn.style.fontSize = "12px";
+    btn.style.borderRadius = "10px";
+    btn.style.border = "1px solid rgba(103,232,249,0.35)";
+    btn.style.background = "rgba(7, 9, 12, 0.92)";
+    btn.style.color = "#c7fbff";
+    btn.style.cursor = "pointer";
+    btn.addEventListener("click", async () => {
+      const text = audioDebugLines.join("\n");
+      try {
+        if (navigator?.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          btn.textContent = "Copied!";
+          window.setTimeout(() => { btn.textContent = "Copy audio logs"; }, 1200);
+          return;
+        }
+      } catch {
+        /* fall through */
+      }
+      // Fallback: prompt for manual copy
+      window.prompt("Copy audio logs:", text);
+    });
+    document.body.appendChild(btn);
+    elAudioDebugCopyBtn = btn;
+    return pre;
+  } catch {
+    return null;
+  }
+}
+function pushAudioDebugLine(line) {
+  audioDebugLines.push(line);
+  if (audioDebugLines.length > 80) audioDebugLines = audioDebugLines.slice(-80);
+  const el = ensureAudioDebugOverlay();
+  if (el) el.textContent = audioDebugLines.join("\n");
+}
+function audioDebugEnabled() {
+  try {
+    if (typeof window !== "undefined" && window.DEBUG_AUDIO === true) return true;
+    if (typeof window !== "undefined" && window.DEBUG_AUDIO === false) return false;
+  } catch { /* ignore */ }
+  return AUDIO_DEBUG_DEFAULT;
+}
+function audioDebugLog(obj) {
+  if (!audioDebugEnabled()) return;
+  const nowMs = performance?.now ? performance.now() : Date.now();
+  // Throttle: max ~12 logs/sec, with small bursts.
+  if (nowMs - audioDebugLastLogAt < 80) {
+    audioDebugBurst++;
+    if (audioDebugBurst > 2) return;
+  } else {
+    audioDebugBurst = 0;
+    audioDebugLastLogAt = nowMs;
+  }
+  try {
+    // Keep it single-line so it’s easy to scan.
+    const line = `[audio-debug] ${JSON.stringify(obj)}`;
+    // Console (when available)
+    try { console.log(line); } catch { /* ignore */ }
+    // In-app overlay (always)
+    pushAudioDebugLine(line);
+  } catch { /* ignore */ }
+}
+
 const ROWS = 16;
 const BPM_RANGE_MIN = 40;
 const BPM_RANGE_MAX = 300;
@@ -429,26 +536,27 @@ const elCellMenuSelect = document.getElementById("cellMenuSelect");
 
 // Audio
 let engineReady = false;
-let synthPulse1 = null; // Tone.PulseOscillator
-let synthPulse2 = null; // Tone.PulseOscillator
-let synthWave = null; // Tone.Oscillator
-let synthNoise = null; // Tone.Noise
-let panPulse1 = null;
-let panPulse2 = null;
-let panWave = null;
-let panNoise = null;
+let synthPulse1 = null; // OscillatorNode
+let synthPulse2 = null; // OscillatorNode
+let synthWave = null; // OscillatorNode
+let synthNoise = null; // AudioBufferSourceNode
+let panPulse1 = null; // StereoPannerNode
+let panPulse2 = null; // StereoPannerNode
+let panWave = null; // StereoPannerNode
+let panNoise = null; // StereoPannerNode
 // Mixer gain (controlled by mixVol)
-let gainPulse1 = null;
-let gainPulse2 = null;
-let gainWave = null;
-let gainNoise = null;
+let gainPulse1 = null; // GainNode
+let gainPulse2 = null; // GainNode
+let gainWave = null; // GainNode
+let gainNoise = null; // GainNode
 // Gate gain (controlled by instrument ENV/LENGTH)
-let gatePulse1 = null;
-let gatePulse2 = null;
-let gateWave = null;
-let gateNoise = null;
-let master = null;
+let gatePulse1 = null; // GainNode
+let gatePulse2 = null; // GainNode
+let gateWave = null; // GainNode
+let gateNoise = null; // GainNode
+let master = null; // GainNode
 let stepEventId = null;
+let audioCtx = null; // raw AudioContext
 
 // Track sustained notes per channel (LENGTH=1F).
 const heldNoteByChannel = new Array(4).fill(false);
@@ -475,9 +583,8 @@ function channelSynth(ch) {
 function hardMuteGateAtTime(gate, time) {
   if (!gate?.gain) return;
   try {
-    if (gate.gain.cancelScheduledValues) gate.gain.cancelScheduledValues(time);
-    if (gate.gain.setValueAtTime) gate.gain.setValueAtTime(0, time);
-    else if (gate.gain.value != null) gate.gain.value = 0;
+    gate.gain.cancelScheduledValues(time);
+    gate.gain.setValueAtTime(0, time);
   } catch {
     /* ignore */
   }
@@ -488,6 +595,58 @@ function hardMuteAllGatesAtTime(time) {
   hardMuteGateAtTime(gatePulse2, time);
   hardMuteGateAtTime(gateWave, time);
   hardMuteGateAtTime(gateNoise, time);
+}
+
+function waveTypeForInstrumentMode(mode) {
+  const m = clamp((mode ?? 0) | 0, 0, 3);
+  return m === 0 ? "triangle" : m === 1 ? "sawtooth" : m === 2 ? "square" : "sine";
+}
+
+function pulseWidthForInstrumentMode(mode) {
+  const m = clamp((mode ?? 0) | 0, 0, 3);
+  return m === 0 ? 0.125 : m === 1 ? 0.25 : m === 2 ? 0.5 : 0.75;
+}
+
+function stopAndDisconnectNodeAtTime(node, time) {
+  if (!node) return;
+  try { if (typeof node.stop === "function") node.stop(time); } catch { /* ignore */ }
+  try { node.disconnect(); } catch { /* ignore */ }
+}
+
+function replaceOscillatorForChannelAtTime(channel, instrument, freqHz, time) {
+  if (!audioCtx) return null;
+  const ch = clamp(channel | 0, 0, 3);
+  if (ch === 3) return synthNoise; // noise is separate looping source
+  const ins = instrument || defaultInstrumentObject(0);
+  const pan = channelPanner(ch);
+  if (!pan) return null;
+
+  const t = Math.max(time, audioCtx.currentTime + 0.001);
+  const f = Math.max(0, Number(freqHz) || 0);
+
+  const osc = audioCtx.createOscillator();
+  osc.frequency.setValueAtTime(f, t);
+  if (osc.detune) osc.detune.setValueAtTime(0, t);
+
+  if (ch === 0 || ch === 1) {
+    osc.type = "sine"; // will be overridden by periodic wave
+    const w = pulseWidthForInstrumentMode(ins.mode);
+    applyPulseWidthAtTime(osc, w, t);
+  } else {
+    osc.type = waveTypeForInstrumentMode(ins.mode);
+  }
+
+  osc.connect(pan);
+  osc.start(t);
+
+  // Swap the global ref and stop old oscillator.
+  const old = ch === 0 ? synthPulse1 : ch === 1 ? synthPulse2 : synthWave;
+  stopAndDisconnectNodeAtTime(old, t);
+  if (ch === 0) synthPulse1 = osc;
+  else if (ch === 1) synthPulse2 = osc;
+  else synthWave = osc;
+
+  return osc;
 }
 
 function panFromOutput(output) {
@@ -513,26 +672,9 @@ function applyInstrumentToChannelAtTime(channel, instrument, time) {
       ins.mode === 0 ? "triangle" :
       ins.mode === 1 ? "sawtooth" :
       ins.mode === 2 ? "square" : "sine";
-    if (synthWave?.oscillator?.type != null) {
-      try {
-        if (synthWave.oscillator.setValueAtTime) synthWave.oscillator.type = waveType;
-        else synthWave.oscillator.type = waveType;
-      } catch {
-        /* ignore */
-      }
-    }
+    try { if (synthWave) synthWave.type = waveType; } catch { /* ignore */ }
   } else {
-    const noiseType =
-      ins.mode === 0 ? "white" :
-      ins.mode === 1 ? "pink" :
-      ins.mode === 2 ? "brown" : "brown";
-    if (synthNoise?.noise?.type != null) {
-      try {
-        synthNoise.noise.type = noiseType;
-      } catch {
-        /* ignore */
-      }
-    }
+    // Noise flavor not implemented yet for raw buffer noise (future).
   }
 
   // Output (pan) is set per-trigger in triggerStep to allow CMD 'O' override.
@@ -543,13 +685,31 @@ function resetChannelPitchStateAtTime(channel, time) {
   const synth = channelSynth(ch);
   if (!synth) return;
   try {
-    if (synth.detune?.cancelScheduledValues) synth.detune.cancelScheduledValues(time);
-    if (synth.detune?.setValueAtTime) synth.detune.setValueAtTime(0, time);
-    else if (synth.detune?.value != null) synth.detune.value = 0;
-    if (synth.frequency?.cancelScheduledValues) synth.frequency.cancelScheduledValues(time);
+    if (synth.detune) {
+      synth.detune.cancelScheduledValues(time);
+      synth.detune.setValueAtTime(0, time);
+    }
+    if (synth.frequency) {
+      synth.frequency.cancelScheduledValues(time);
+    }
   } catch {
     /* ignore */
   }
+}
+
+function setOscFrequencyAtTime(osc, freqHz, time) {
+  if (!osc) return;
+  const f = Math.max(0, Number(freqHz) || 0);
+  try {
+    if (osc.frequency) {
+      osc.frequency.cancelScheduledValues(time);
+      osc.frequency.setValueAtTime(f, time);
+    }
+  } catch { /* ignore */ }
+}
+
+function restartSourceAtTime(_src, _time) {
+  // Deprecated: WebAudio OscillatorNode cannot be restarted; we re-create oscillators per note now.
 }
 
 function forceChannelReleaseAtTime(channel, time) {
@@ -589,6 +749,20 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
   const floor = 0.0001;
   const t0 = time + lookAheadSec;
   const tOpen = t0 + openRampSec;
+
+  audioDebugLog({
+    where: "scheduleEnvelope",
+    ch,
+    time,
+    t0,
+    tOpen,
+    lengthSec,
+    env1: ins.env1,
+    env2: ins.env2,
+    env3: ins.env3,
+    envDurRaw,
+    envDur,
+  });
 
   try {
     // Start from silence, then begin envelope after a tiny look-ahead.
@@ -2620,30 +2794,79 @@ async function masterStart() {
   if (engineReady) return;
   await Tone.start();
 
-  master = new Tone.Gain(0.9).toDestination();
+  const raw = Tone.getContext()?.rawContext;
+  if (!raw) throw new Error("No AudioContext");
+  audioCtx = raw;
+  master = raw.createGain();
+  master.gain.value = 0.9;
+  master.connect(raw.destination);
 
-  gainPulse1 = new Tone.Gain(0.9).connect(master);
-  gainPulse2 = new Tone.Gain(0.9).connect(master);
-  gainWave = new Tone.Gain(0.9).connect(master);
-  gainNoise = new Tone.Gain(0.9).connect(master);
+  gainPulse1 = raw.createGain();
+  gainPulse2 = raw.createGain();
+  gainWave = raw.createGain();
+  gainNoise = raw.createGain();
+  gainPulse1.gain.value = 0.9;
+  gainPulse2.gain.value = 0.9;
+  gainWave.gain.value = 0.9;
+  gainNoise.gain.value = 0.9;
+  gainPulse1.connect(master);
+  gainPulse2.connect(master);
+  gainWave.connect(master);
+  gainNoise.connect(master);
 
-  // Gate nodes start at 0 so always-running sources are silent until sequenced.
-  gatePulse1 = new Tone.Gain(0).connect(gainPulse1);
-  gatePulse2 = new Tone.Gain(0).connect(gainPulse2);
-  gateWave = new Tone.Gain(0).connect(gainWave);
-  gateNoise = new Tone.Gain(0).connect(gainNoise);
+  // Gate nodes start at 0 so sources are silent until sequenced.
+  gatePulse1 = raw.createGain();
+  gatePulse2 = raw.createGain();
+  gateWave = raw.createGain();
+  gateNoise = raw.createGain();
+  gatePulse1.gain.value = 0;
+  gatePulse2.gain.value = 0;
+  gateWave.gain.value = 0;
+  gateNoise.gain.value = 0;
+  gatePulse1.connect(gainPulse1);
+  gatePulse2.connect(gainPulse2);
+  gateWave.connect(gainWave);
+  gateNoise.connect(gainNoise);
 
-  panPulse1 = new Tone.Panner(0).connect(gatePulse1);
-  panPulse2 = new Tone.Panner(0).connect(gatePulse2);
-  panWave = new Tone.Panner(0).connect(gateWave);
-  panNoise = new Tone.Panner(0).connect(gateNoise);
+  panPulse1 = raw.createStereoPanner();
+  panPulse2 = raw.createStereoPanner();
+  panWave = raw.createStereoPanner();
+  panNoise = raw.createStereoPanner();
+  panPulse1.pan.value = 0;
+  panPulse2.pan.value = 0;
+  panWave.pan.value = 0;
+  panNoise.pan.value = 0;
+  panPulse1.connect(gatePulse1);
+  panPulse2.connect(gatePulse2);
+  panWave.connect(gateWave);
+  panNoise.connect(gateNoise);
 
-  // IMPORTANT: Use always-running sources and gate via per-channel GainNode only.
-  // This avoids any Tone.Synth internal retrigger pitch artifacts (“blips”).
-  synthPulse1 = new Tone.PulseOscillator({ frequency: 440, width: 0.25 }).connect(panPulse1);
-  synthPulse2 = new Tone.PulseOscillator({ frequency: 440, width: 0.25 }).connect(panPulse2);
-  synthWave = new Tone.Oscillator({ frequency: 440, type: state.wavType || "triangle" }).connect(panWave);
-  synthNoise = new Tone.Noise({ type: state.noiseType || "white" }).connect(panNoise);
+  // Create initial sources; we will re-create oscillators on each note for clean phase.
+  synthPulse1 = raw.createOscillator();
+  synthPulse1.type = "sine";
+  synthPulse1.frequency.value = 440;
+  applyPulseWidthAtTime(synthPulse1, 0.25, raw.currentTime);
+  synthPulse2 = raw.createOscillator();
+  synthPulse2.type = "sine";
+  synthPulse2.frequency.value = 440;
+  applyPulseWidthAtTime(synthPulse2, 0.25, raw.currentTime);
+  synthWave = raw.createOscillator();
+  synthWave.type = "triangle";
+  synthWave.frequency.value = 440;
+
+  // Noise: looping buffer source.
+  const noiseBuf = raw.createBuffer(1, raw.sampleRate, raw.sampleRate);
+  const data = noiseBuf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  synthNoise = raw.createBufferSource();
+  synthNoise.buffer = noiseBuf;
+  synthNoise.loop = true;
+
+  synthPulse1.connect(panPulse1);
+  synthPulse2.connect(panPulse2);
+  synthWave.connect(panWave);
+  synthNoise.connect(panNoise);
+
   synthPulse1.start();
   synthPulse2.start();
   synthWave.start();
@@ -2651,8 +2874,6 @@ async function masterStart() {
 
   // Apply saved UI settings
   Tone.Transport.bpm.value = state.bpm;
-  applyPulseWidth(1, state.pulse1Width);
-  applyPulseWidth(2, state.pulse2Width);
   applyInstrumentSettingsFromState();
 
   engineReady = true;
@@ -2662,12 +2883,8 @@ async function masterStart() {
 
 function applyInstrumentSettingsFromState() {
   // WAV / NOI
-  if (synthWave?.type != null && typeof state.wavType === "string") {
-    try { synthWave.type = state.wavType; } catch { /* ignore */ }
-  }
-  if (synthNoise?.type != null && typeof state.noiseType === "string") {
-    try { synthNoise.type = state.noiseType; } catch { /* ignore */ }
-  }
+  // Wave type is set per-trigger for channel 2.
+  // Noise type is selected by regenerating the noise buffer in masterStart only.
 
   // Mixer (0..100 -> 0..1)
   const vols = Array.isArray(state.mixVol) ? state.mixVol : [90, 90, 90, 90];
@@ -2675,10 +2892,10 @@ function applyInstrumentSettingsFromState() {
   const g1 = clamp((vols[1] ?? 90) / 100, 0, 1);
   const g2 = clamp((vols[2] ?? 90) / 100, 0, 1);
   const g3 = clamp((vols[3] ?? 90) / 100, 0, 1);
-  if (gainPulse1?.gain?.value != null) gainPulse1.gain.value = g0;
-  if (gainPulse2?.gain?.value != null) gainPulse2.gain.value = g1;
-  if (gainWave?.gain?.value != null) gainWave.gain.value = g2;
-  if (gainNoise?.gain?.value != null) gainNoise.gain.value = g3;
+  if (gainPulse1?.gain) gainPulse1.gain.value = g0;
+  if (gainPulse2?.gain) gainPulse2.gain.value = g1;
+  if (gainWave?.gain) gainWave.gain.value = g2;
+  if (gainNoise?.gain) gainNoise.gain.value = g3;
 }
 
 function instrToChannel(instrHex) {
@@ -2729,12 +2946,25 @@ function widthFromByte(valByte) {
 }
 
 function applyPulseWidthAtTime(osc, width, time) {
-  if (!osc) return;
-  const w = clamp(Number(width) || 0.5, 0.01, 0.99);
-  // Tone.PulseOscillator exposes width as a Signal.
-  if (osc?.width?.setValueAtTime) osc.width.setValueAtTime(w, time);
-  else if (osc?.width?.value != null) osc.width.value = w;
-  else if (osc?.width != null && typeof osc.width === "number") osc.width = w;
+  // WebAudio OscillatorNode has no pulse width; we emulate PWM via PeriodicWave.
+  if (!osc || !osc.setPeriodicWave) return;
+  const w = clamp(Number(width) || 0.5, 0.02, 0.98);
+  const ctx = osc.context;
+  // Pulse wave Fourier series: a_n = (2 / (nπ)) * sin(nπw)
+  const harmonics = 64;
+  const real = new Float32Array(harmonics);
+  const imag = new Float32Array(harmonics);
+  for (let n = 1; n < harmonics; n++) {
+    const a = (2 / (n * Math.PI)) * Math.sin(n * Math.PI * w);
+    imag[n] = a;
+    real[n] = 0;
+  }
+  try {
+    const wave = ctx.createPeriodicWave(real, imag, { disableNormalization: false });
+    osc.setPeriodicWave(wave);
+  } catch {
+    /* ignore */
+  }
 }
 
 function transposeNoteBySemis(note, semis) {
@@ -2761,12 +2991,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
 
   const semis = cmd === "P" ? pitchSignedSemitones(valByte) : 0;
 
-  const synth =
-    channel === 0 ? synthPulse1 :
-    channel === 1 ? synthPulse2 :
-    channel === 2 ? synthWave :
-    synthNoise;
-
+  let synth = channelSynth(channel);
   if (!synth) return;
 
   const panner =
@@ -2780,6 +3005,27 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   const now = Tone.getContext()?.rawContext?.currentTime ?? time;
   const safeTime = Math.max(time, now + 0.004); // safety margin to avoid “near-now” reordering artifacts
   const g = channelGain(channel);
+
+  audioDebugLog({
+    where: "triggerStep",
+    now,
+    time,
+    safeTime,
+    dtMs: Math.round((safeTime - now) * 1000),
+    channel,
+    cmd,
+    note: step.note || "--",
+    instrumentId,
+    instrument: {
+      type: instrument.type,
+      mode: instrument.mode,
+      env1: instrument.env1,
+      env2: instrument.env2,
+      env3: instrument.env3,
+      output: instrument.output,
+      length: instrument.length,
+    },
+  });
 
   // 1) Immediate mute at safeTime (kills lingering previous audio).
   hardMuteGateAtTime(g, safeTime);
@@ -2852,9 +3098,11 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   // 3) Pitch first: set oscillator frequency at the event time so the envelope comes up on the correct pitch.
   try {
     const freq = Tone.Frequency(baseNote).toFrequency();
-    if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, safeTime);
-    // Re-assert at +lookAhead to avoid any internal smoothing oddities.
-    if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, safeTime + 0.02);
+    // Re-create oscillator at note boundary (clean phase + deterministic params).
+    const next = replaceOscillatorForChannelAtTime(channel, instrument, freq, safeTime);
+    if (next) synth = next;
+    setOscFrequencyAtTime(synth, freq, safeTime);
+    audioDebugLog({ where: "pitchSet", channel, baseNote, freq, safeTime });
   } catch {
     /* ignore */
   }
@@ -2877,7 +3125,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
       // Arp: schedule frequency changes; gain envelope already handles loudness.
       try {
         const freq = Tone.Frequency(notes[i]).toFrequency();
-        if (synth.frequency?.setValueAtTime) synth.frequency.setValueAtTime(freq, t);
+        setOscFrequencyAtTime(synth, freq, t);
       } catch { /* ignore */ }
       // Optional: small gate pulse for separation
       try {
