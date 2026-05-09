@@ -370,7 +370,7 @@ const CMD_SET = new Set(["V", "P", "O", "D", "A", "W", "T", "K"]);
 const CMD_ORDER = [null, "V", "P", "O", "D", "A", "W", "T", "K"];
 /** Non-null command cycle: `--` sits between `K` (wrap down) and `V` (wrap up). */
 const PHRASE_CMD_CYCLE = ["V", "P", "O", "D", "A", "W", "T", "K"];
-/** First note when nudging up from an empty (`--`) note cell. */
+/** First note when nudging up from an empty (`--`) note cell (natural C, octave 3 — not C#). */
 const PHRASE_NOTE_EMPTY_UP = "C3";
 const PHRASE_NOTE_NUM_MIN = 0;
 const PHRASE_NOTE_NUM_MAX = 8 * 12 + 11; // B8
@@ -2302,6 +2302,27 @@ function nudgeBarSign(action) {
   return 0;
 }
 
+/** Map Z+Arrow deltas to nudge-bar actions (single source of truth with UI buttons). */
+function nudgeActionFromKeyboardDelta(delta) {
+  const d = Number(delta) | 0;
+  if (d === 1) return "inc";
+  if (d === -1) return "dec";
+  if (d === 16) return "jump_inc";
+  if (d === -16) return "jump_dec";
+  return null;
+}
+
+/**
+ * Smart nudge from `--` on a 00..FF slot: + → `00`, − → `FF`; jump adds `step` after that anchor.
+ */
+function nudgeByteFromEmpty(sign, step) {
+  const st = step | 0;
+  if (sign > 0 && st === 1) return 0x00;
+  if (sign < 0 && st === 1) return 0xff;
+  const base = sign > 0 ? 0x00 : 0xff;
+  return clampByte(base + sign * st);
+}
+
 /** Song / chain id slots: unset or classic “empty” byte. */
 function isEmptySongChainByte(v) {
   return v == null || v === 0xff;
@@ -2507,10 +2528,12 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
     const cc = clamp(col, 0, SONG_COLS.length - 1);
     const songRow = state.song?.[rr];
     const cur = Array.isArray(songRow) ? songRow[cc] : (cc === 0 ? songRow : null);
-    const start = cur == null ? 0x00 : clampByte(cur);
     const sign = nudgeBarSign(action);
     const step = !isRandom && action.startsWith("jump") ? 16 : 1;
-    const next = isRandom ? randomInt(0, 255) : clampByte(start + sign * step);
+    let next;
+    if (isRandom) next = randomInt(0, 255);
+    else if (cur == null) next = nudgeByteFromEmpty(sign, step);
+    else next = clampByte(clampByte(cur) + sign * step);
     if (Array.isArray(songRow)) songRow[cc] = next;
     else if (cc === 0) state.song[rr] = next;
     return;
@@ -2527,8 +2550,11 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
     const delta = isRandom ? 0 : sign * step;
 
     if (cc === 0) {
-      const start = entry.phraseId == null ? 0x00 : clampByte(entry.phraseId);
-      const next = isRandom ? randomInt(0, 255) : clampByte(start + delta);
+      const cur = entry.phraseId;
+      let next;
+      if (isRandom) next = randomInt(0, 255);
+      else if (cur == null) next = nudgeByteFromEmpty(sign, step);
+      else next = clampByte(clampByte(cur) + delta);
       entry.phraseId = next;
       state.chains[activeChainId][rr] = entry;
       return;
@@ -2626,8 +2652,12 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
     }
 
     if (colKey === "val") {
-      const start = step.val == null ? 0x00 : clampByte(step.val);
-      const next = isRandom ? randomInt(0, 255) : clampByte(start + sign * (isJump ? 16 : 1));
+      const stepSz = isJump ? 16 : 1;
+      const cur = step.val;
+      let next;
+      if (isRandom) next = randomInt(0, 255);
+      else if (cur == null) next = nudgeByteFromEmpty(sign, stepSz);
+      else next = clampByte(clampByte(cur) + sign * stepSz);
       step.val = next;
       ensureValSemantics(step);
     }
@@ -2721,51 +2751,38 @@ function nudgeSelectedCell({ action, isRandom }) {
 
 function applySongHexDelta(delta) {
   if (activeScreen !== "S") return;
-  const row = state.song?.[songSelRow];
-  const cur = Array.isArray(row) ? row[songSelCol] : (songSelCol === 0 ? row : null);
-  if (cur == null) {
-    if (Array.isArray(row)) row[songSelCol] = 0x00;
-    else if (songSelCol === 0) state.song[songSelRow] = 0x00;
-    saveState();
-    renderSongView();
-    setStatusCursor();
-    setStatus(`Song ${SONG_COLS[songSelCol]?.key ?? "--"} @ ${rowHex(songSelRow)} = ${chainLabel(0x00)}`);
-    return;
-  }
-  const next = clampByte((cur ?? 0) + delta);
-  if (Array.isArray(row)) row[songSelCol] = next;
-  else if (songSelCol === 0) state.song[songSelRow] = next;
+  const action = nudgeActionFromKeyboardDelta(delta);
+  if (!action) return;
+  applyNudgeToCell("S", songSelRow, songSelCol, action, false);
   saveState();
   renderSongView();
   setStatusCursor();
-  setStatus(`Song ${SONG_COLS[songSelCol]?.key ?? "--"} @ ${rowHex(songSelRow)} = ${chainLabel(next)}`);
+  const row = state.song?.[songSelRow];
+  const v = Array.isArray(row) ? row[songSelCol] : (songSelCol === 0 ? row : null);
+  setStatus(
+    `Song ${SONG_COLS[songSelCol]?.key ?? "--"} @ ${rowHex(songSelRow)} = ${v == null ? "--" : chainLabel(v)}`,
+  );
 }
 
 function applyChainHexDelta(delta) {
   if (activeScreen !== "C") return;
   const chain = state.chains?.[activeChainId] ?? Array.from({ length: ROWS }, () => emptyChainRow());
   state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
-  const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
   if (chainSelCol === 0) {
-    if (entry.phraseId == null) {
-      entry.phraseId = 0x00;
-      if (entry.tsp == null) entry.tsp = 0x00;
-      state.chains[activeChainId][chainSelRow] = entry;
-      saveState();
-      renderChainView();
-      setStatusCursor();
-      setStatus(`Chain ${idHex(activeChainId)} PHR @ ${rowHex(chainSelRow)} = ${phraseLabel(0x00)}`);
-      return;
-    }
-    const next = clampByte((entry.phraseId ?? 0) + delta);
-    entry.phraseId = next;
-    state.chains[activeChainId][chainSelRow] = entry;
+    const action = nudgeActionFromKeyboardDelta(delta);
+    if (!action) return;
+    applyNudgeToCell("C", chainSelRow, chainSelCol, action, false);
+    state.chains[activeChainId] = chain.map((r) => normalizeChainRow(r));
+    const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
     saveState();
     renderChainView();
     setStatusCursor();
-    setStatus(`Chain ${idHex(activeChainId)} PHR @ ${rowHex(chainSelRow)} = ${phraseLabel(next)}`);
+    setStatus(
+      `Chain ${idHex(activeChainId)} PHR @ ${rowHex(chainSelRow)} = ${entry.phraseId == null ? "--" : phraseLabel(entry.phraseId)}`,
+    );
     return;
   }
+  const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
   const curSemis = semisFromTspByte(entry.tsp);
   const nextSemis = clamp(curSemis + delta, -12, 12);
   entry.tsp = tspByteFromSemis(nextSemis);
@@ -2778,38 +2795,18 @@ function applyChainHexDelta(delta) {
 
 function applyByteDelta(field, delta) {
   if (activeScreen !== "P") return;
+  if (field !== "instr" && field !== "val") return;
+  const action = nudgeActionFromKeyboardDelta(delta);
+  if (!action) return;
+  applyNudgeToCell("P", selRow, selCol, action, false);
   const step = currentPhrase().steps[selRow];
-  if (field === "instr") {
-    let next;
-    if (step.instr == null) {
-      if (delta === 1) next = 0;
-      else if (delta === -1) next = 0x1f;
-      else if (delta === 16) next = clamp(0 + 16, 0, 31);
-      else if (delta === -16) next = clamp(0x1f - 16, 0, 31);
-      else next = clamp((delta > 0 ? 0 : 0x1f) + delta, 0, 31);
-    } else {
-      const cur = clamp(step.instr | 0, 0, 31);
-      if (delta > 0 && cur === 0x1f) next = null;
-      else if (delta < 0 && cur === 0) next = null;
-      else {
-        const raw = cur + delta;
-        if (raw < 0 || raw > 31) next = null;
-        else next = raw;
-      }
-    }
-    step.instr = next;
-    saveState();
-    renderTracker();
-    setStatus(`${COLS[selCol].label} @ ${rowHex(selRow)} = ${displayInstr(next)}`);
-    return;
-  }
-  const current = step[field];
-  const next = clampByte((current == null ? 0 : current) + delta);
-  step[field] = next;
-  if (field === "val") ensureValSemantics(step);
   saveState();
   renderTracker();
-  setStatus(`${COLS[selCol].label} @ ${rowHex(selRow)} = ${displayByte(next, { kind: field === "cmd" ? "cmd" : "hex" })}`);
+  if (field === "instr") {
+    setStatus(`${COLS[selCol].label} @ ${rowHex(selRow)} = ${displayInstr(step.instr)}`);
+  } else {
+    setStatus(`${COLS[selCol].label} @ ${rowHex(selRow)} = ${displayByte(step.val, { kind: "hex" })}`);
+  }
 }
 
 function applyCmdDelta(delta) {
@@ -3388,124 +3385,46 @@ function getSelectedCellElement() {
 
 function applyNoteSemitoneDelta(delta) {
   if (activeScreen !== "P") return;
-  const step = currentPhrase().steps[selRow];
-  const prevNote = step.note;
   const d = Number(delta) || 0;
-  if (!normalizeNote(step.note)) {
-    if (d > 0) step.note = PHRASE_NOTE_EMPTY_UP;
-    else step.note = makeNote(partsFromNoteNumber(PHRASE_NOTE_NUM_MAX));
-    assignActiveInstrumentOnNewNote(step, prevNote);
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
-    return;
-  }
-  const parsed = parseNote(step.note);
-  if (!parsed) return;
-  const start = noteNumberFromParts(parsed);
-  if (d > 0 && start >= PHRASE_NOTE_NUM_MAX) {
-    step.note = "";
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
-    return;
-  }
-  if (d < 0 && start <= PHRASE_NOTE_NUM_MIN) {
-    step.note = "";
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
-    return;
-  }
-  const next = partsFromNoteNumber(start + d);
-  step.note = makeNote(next);
-  assignActiveInstrumentOnNewNote(step, prevNote);
+  const action = d > 0 ? "inc" : "dec";
+  if (d === 0) return;
+  applyNudgeToCell("P", selRow, selCol, action, false);
+  const step = currentPhrase().steps[selRow];
   saveState();
   renderTracker();
-  setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
+  setStatus(`NOTE @ ${rowHex(selRow)} = ${placeholderOrNote(step.note)}`);
 }
 
 function applyNoteOctaveDelta(delta) {
   if (activeScreen !== "P") return;
-  const step = currentPhrase().steps[selRow];
-  const prevNote = step.note;
   const d = Number(delta) || 0;
-  if (!normalizeNote(step.note)) {
-    const base = d > 0 ? noteNumberFromParts(parseNote(PHRASE_NOTE_EMPTY_UP) ?? { idx: 0, octave: 3 }) : PHRASE_NOTE_NUM_MAX;
-    const nextN = clamp(base + 12 * d, PHRASE_NOTE_NUM_MIN, PHRASE_NOTE_NUM_MAX);
-    step.note = makeNote(partsFromNoteNumber(nextN));
-    assignActiveInstrumentOnNewNote(step, prevNote);
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
-    return;
-  }
-  const parsed = parseNote(step.note);
-  if (!parsed) return;
-  const start = noteNumberFromParts(parsed);
-  if (d > 0 && start >= PHRASE_NOTE_NUM_MAX) {
-    step.note = "";
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
-    return;
-  }
-  if (d < 0 && start <= PHRASE_NOTE_NUM_MIN) {
-    step.note = "";
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
-    return;
-  }
-  const nextN = start + 12 * d;
-  if (nextN > PHRASE_NOTE_NUM_MAX || nextN < PHRASE_NOTE_NUM_MIN) {
-    step.note = "";
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
-    return;
-  }
-  step.note = makeNote(partsFromNoteNumber(nextN));
-  assignActiveInstrumentOnNewNote(step, prevNote);
+  const action = d > 0 ? "jump_inc" : "jump_dec";
+  if (d === 0) return;
+  applyNudgeToCell("P", selRow, selCol, action, false);
+  const step = currentPhrase().steps[selRow];
   saveState();
   renderTracker();
-  setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
+  setStatus(`NOTE @ ${rowHex(selRow)} = ${placeholderOrNote(step.note)}`);
 }
 
 function applyNoteDelta({ pitchDelta = 0, octaveDelta = 0 }) {
   if (activeScreen !== "P") return;
-  const step = currentPhrase().steps[selRow];
-  const prevNote = step.note;
   const net = (Number(pitchDelta) || 0) + 12 * (Number(octaveDelta) || 0);
-  if (!normalizeNote(step.note)) {
-    const baseN =
-      net >= 0
-        ? noteNumberFromParts(parseNote(PHRASE_NOTE_EMPTY_UP) ?? { idx: 0, octave: 3 })
-        : PHRASE_NOTE_NUM_MAX;
-    const nextN = clamp(baseN + net, PHRASE_NOTE_NUM_MIN, PHRASE_NOTE_NUM_MAX);
-    step.note = makeNote(partsFromNoteNumber(nextN));
-    assignActiveInstrumentOnNewNote(step, prevNote);
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
-    return;
+  if (net === 0) return;
+  const abs = Math.abs(net);
+  const jumpSteps = Math.floor(abs / 12);
+  const rem = abs % 12;
+  const sign = net > 0 ? 1 : -1;
+  for (let i = 0; i < jumpSteps; i++) {
+    applyNudgeToCell("P", selRow, selCol, sign > 0 ? "jump_inc" : "jump_dec", false);
   }
-  const parsed = parseNote(step.note);
-  if (!parsed) return;
-  const startN = noteNumberFromParts(parsed);
-  const nextN = startN + net;
-  if (nextN > PHRASE_NOTE_NUM_MAX || nextN < PHRASE_NOTE_NUM_MIN) {
-    step.note = "";
-    saveState();
-    renderTracker();
-    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
-    return;
+  for (let i = 0; i < rem; i++) {
+    applyNudgeToCell("P", selRow, selCol, sign > 0 ? "inc" : "dec", false);
   }
-  step.note = makeNote(partsFromNoteNumber(nextN));
-  assignActiveInstrumentOnNewNote(step, prevNote);
+  const step = currentPhrase().steps[selRow];
   saveState();
   renderTracker();
-  setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
+  setStatus(`NOTE @ ${rowHex(selRow)} = ${placeholderOrNote(step.note)}`);
 }
 
 function handleArrowWithA(key) {
