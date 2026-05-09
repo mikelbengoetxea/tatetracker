@@ -203,7 +203,7 @@ function defaultInstrumentObject(index) {
     mode: 0x01,
     env1: 0x0a,
     env2: 0x00,
-    env3: 0x05,
+    env3: 0x01,
     output: 0x00,
     length: 0x1f,
     tablePreset: 0,
