@@ -1,10 +1,12 @@
 /* global Tone */
 
 const STORAGE_KEY = "tate-tracker:v1";
-const BUILD_TAG = "poly-worklet-1";
+const BUILD_TAG = "poly-worklet-2";
 
-// Audio debug: defaults ON (throttled). You can still disable with `window.DEBUG_AUDIO = false`.
+// Audio debug: defaults OFF. Enable with `window.DEBUG_AUDIO = true` or `?audioDebug=1`.
 const AUDIO_DEBUG_DEFAULT = false;
+/** When true (or `?audioTiming=1`), logs scheduling skew / safeTime slip for every trigger (not throttled). */
+let audioTimingFromUrl = null;
 let audioDebugLastLogAt = 0;
 let audioDebugBurst = 0;
 let audioDebugLines = [];
@@ -13,9 +15,33 @@ let elAudioDebugCopyBtn = null;
 let elAudioDebugMarkBtn = null;
 let audioDebugOscId = 0;
 let audioDebugTriggerCount = 0;
+function anyAudioDebugUIEnabled() {
+  return audioDebugEnabled() || audioTimingDebugEnabled();
+}
+
+function audioTimingDebugEnabled() {
+  try {
+    if (typeof window !== "undefined" && window.DEBUG_AUDIO_TIMING === true) return true;
+    if (typeof window !== "undefined" && window.DEBUG_AUDIO_TIMING === false) return false;
+    if (audioTimingFromUrl == null) {
+      audioTimingFromUrl = false;
+      if (typeof window !== "undefined" && window.location?.search) {
+        const q = new URLSearchParams(window.location.search);
+        const a = q.get("audioTiming");
+        const t = q.get("timing");
+        const on = (v) => v === "1" || v === "true" || v === "";
+        audioTimingFromUrl = on(a) || on(t);
+      }
+    }
+    return audioTimingFromUrl;
+  } catch {
+    return false;
+  }
+}
+
 function ensureAudioDebugOverlay() {
   try {
-    if (!audioDebugEnabled()) return null;
+    if (!anyAudioDebugUIEnabled()) return null;
     if (elAudioDebug && document.body.contains(elAudioDebug)) return elAudioDebug;
     elAudioDebug = document.getElementById("audioDebugOverlay");
     if (elAudioDebug) return elAudioDebug;
@@ -84,8 +110,9 @@ function ensureAudioDebugOverlay() {
   }
 }
 function pushAudioDebugLine(line) {
+  const cap = audioTimingDebugEnabled() ? 200 : 80;
   audioDebugLines.push(line);
-  if (audioDebugLines.length > 80) audioDebugLines = audioDebugLines.slice(-80);
+  if (audioDebugLines.length > cap) audioDebugLines = audioDebugLines.slice(-cap);
   const el = ensureAudioDebugOverlay();
   if (el) el.textContent = audioDebugLines.join("\n");
 }
@@ -93,6 +120,12 @@ function audioDebugEnabled() {
   try {
     if (typeof window !== "undefined" && window.DEBUG_AUDIO === true) return true;
     if (typeof window !== "undefined" && window.DEBUG_AUDIO === false) return false;
+    if (typeof window !== "undefined" && window.location?.search) {
+      const q = new URLSearchParams(window.location.search);
+      const v = q.get("audioDebug");
+      if (v === "1" || v === "true" || v === "") return true;
+      if (v === "0" || v === "false") return false;
+    }
   } catch { /* ignore */ }
   return AUDIO_DEBUG_DEFAULT;
 }
@@ -126,16 +159,60 @@ function audioDebugLogCritical(obj) {
   } catch { /* ignore */ }
 }
 
+function audioTimingLog(obj) {
+  if (!audioTimingDebugEnabled()) return;
+  try {
+    const line = `[audio-timing] ${JSON.stringify(obj)}`;
+    try {
+      console.log(line);
+    } catch {
+      /* ignore */
+    }
+    pushAudioDebugLine(line);
+  } catch {
+    /* ignore */
+  }
+}
+
 // Ensure the overlay exists early so it's visible even if audio never starts.
 try {
-  if (audioDebugEnabled()) {
+  if (anyAudioDebugUIEnabled()) {
     ensureAudioDebugOverlay();
     pushAudioDebugLine(`[audio-debug] ${JSON.stringify({ where: "boot", href: window.location?.href || "", build: BUILD_TAG })}`);
+  }
+  if (audioTimingDebugEnabled()) {
+    ensureAudioDebugOverlay();
+    pushAudioDebugLine(
+      `[audio-timing] ${JSON.stringify({
+        where: "boot.hint",
+        msg: "Per-trigger scheduling lines follow when you play. URL: add ?audioTiming=1 — console: window.DEBUG_AUDIO_TIMING=true — off: false",
+      })}`,
+    );
   }
 } catch { /* ignore */ }
 
 function fmtTime(t) {
   return Math.round((Number(t) || 0) * 1000) / 1000;
+}
+
+function logTransportCallbackTiming(mode, transportTime, tickAudioNow) {
+  if (!audioTimingDebugEnabled()) return;
+  const t = Number(transportTime) || 0;
+  const now = Number.isFinite(tickAudioNow) ? tickAudioNow : t;
+  let bpm = null;
+  try {
+    bpm = Tone.Transport?.bpm?.value ?? null;
+  } catch {
+    /* ignore */
+  }
+  audioTimingLog({
+    where: "transport.callback",
+    mode,
+    transportT: fmtTime(t),
+    audioNowT: fmtTime(now),
+    skewAudioMinusTransportMs: Math.round((now - t) * 1000),
+    bpm,
+  });
 }
 
 const ROWS = 16;
@@ -289,8 +366,14 @@ function normalizeNote(s) {
 }
 
 const NOTE_PITCHES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-const CMD_SET = new Set(["V", "P", "O", "D", "A", "W", "T"]);
-const CMD_ORDER = [null, "V", "P", "O", "D", "A", "W", "T"];
+const CMD_SET = new Set(["V", "P", "O", "D", "A", "W", "T", "K"]);
+const CMD_ORDER = [null, "V", "P", "O", "D", "A", "W", "T", "K"];
+/** Non-null command cycle: `--` sits between `K` (wrap down) and `V` (wrap up). */
+const PHRASE_CMD_CYCLE = ["V", "P", "O", "D", "A", "W", "T", "K"];
+/** First note when nudging up from an empty (`--`) note cell. */
+const PHRASE_NOTE_EMPTY_UP = "C3";
+const PHRASE_NOTE_NUM_MIN = 0;
+const PHRASE_NOTE_NUM_MAX = 8 * 12 + 11; // B8
 
 function normalizeCmd(value) {
   if (value == null) return null;
@@ -397,6 +480,8 @@ function defaultState() {
       0x00: phrase00,
     },
     instruments: Array.from({ length: NUM_INSTRUMENTS }, (_, i) => defaultInstrumentObject(i)),
+    /** Phrase editor: last focused instrument (00–1F) for auto-assign on new notes. */
+    activeInstrumentId: 0,
     selectionAnchor: null,
     selectedRange: null,
   };
@@ -419,6 +504,9 @@ function loadState() {
     if (typeof parsed?.noiseType === "string") s.noiseType = parsed.noiseType;
     if (Array.isArray(parsed?.mixVol) && parsed.mixVol.length >= 4) {
       s.mixVol = [0, 1, 2, 3].map((i) => clamp(parseInt(parsed.mixVol[i], 10) || 0, 0, 100));
+    }
+    if (Number.isFinite(parsed?.activeInstrumentId)) {
+      s.activeInstrumentId = clamp((parsed.activeInstrumentId | 0) >>> 0, 0, NUM_INSTRUMENTS - 1);
     }
 
     // New model
@@ -494,6 +582,7 @@ function loadState() {
 }
 
 function saveState() {
+  state.activeInstrumentId = clamp((instrumentTargetIndex | 0) >>> 0, 0, NUM_INSTRUMENTS - 1);
   const persisted = { ...state };
   delete persisted.selectionAnchor;
   delete persisted.selectedRange;
@@ -1339,7 +1428,7 @@ let songSelCol = 0; // 0..3 => PU1..NOI
 let chainSelRow = 0;
 let chainSelCol = 0; // 0..1 => PHR/TSP
 
-let instrumentTargetIndex = 0;
+let instrumentTargetIndex = clamp((state.activeInstrumentId ?? 0) | 0, 0, NUM_INSTRUMENTS - 1);
 let instSelRow = 0;
 let instSelCol = 1;
 
@@ -1466,6 +1555,44 @@ function displayInstr(value) {
   return toHex2(clamp(value | 0, 0, 31));
 }
 
+function phraseStepHasInstrument(step) {
+  return step != null && step.instr != null;
+}
+
+/** Phrase view: cursor on INST column with a non-empty instrument id (strict drill-down to Instrument). */
+function phraseCursorOnFilledInstColumn() {
+  return (
+    activeScreen === "P" &&
+    COLS[selCol]?.key === "instr" &&
+    phraseStepHasInstrument(currentPhrase().steps[selRow])
+  );
+}
+
+function activeInstrumentIdForPhraseEdits() {
+  return clamp((state.activeInstrumentId ?? instrumentTargetIndex) | 0, 0, NUM_INSTRUMENTS - 1);
+}
+
+/** When a row gains a note from an empty note cell, fill INST from the active instrument if still unset. */
+function assignActiveInstrumentOnNewNote(step, prevNoteStr) {
+  const had = !!normalizeNote(prevNoteStr);
+  const has = !!normalizeNote(step.note);
+  if (has && !had && step.instr == null) {
+    step.instr = activeInstrumentIdForPhraseEdits();
+  }
+}
+
+/** Nudge bar: first step from `--` — up → C3, down → B8; jump adds ±12 semitones from that anchor. */
+function phraseNudgeNoteFromEmpty(step, sign, isJump, prevNoteStr) {
+  const baseN =
+    sign > 0
+      ? noteNumberFromParts(parseNote(PHRASE_NOTE_EMPTY_UP) ?? { idx: 0, octave: 3 })
+      : PHRASE_NOTE_NUM_MAX;
+  const delta = sign * (isJump ? 12 : 0);
+  const nextN = clamp(baseN + delta, PHRASE_NOTE_NUM_MIN, PHRASE_NOTE_NUM_MAX);
+  step.note = makeNote(partsFromNoteNumber(nextN));
+  assignActiveInstrumentOnNewNote(step, prevNoteStr);
+}
+
 function displayValForStep(step) {
   const cmd = normalizeCmd(step?.cmd);
   if (!cmd) return "--";
@@ -1559,7 +1686,10 @@ function renderTracker({ force = false } = {}) {
       cell.dataset.col = String(c);
 
       if (COLS[c].key === "row") cell.classList.add("cell--row");
-      if (COLS[c].key === "note") cell.classList.add("cell--note");
+      if (COLS[c].key === "note") {
+        cell.classList.add("cell--note");
+        if (normalizeNote(step.note) && !phraseStepHasInstrument(step)) cell.classList.add("cell--note-muted");
+      }
       if (COLS[c].key === "instr") cell.classList.add("cell--instr");
       if (COLS[c].key === "cmd") cell.classList.add("cell--cmd");
       if (COLS[c].key === "val") cell.classList.add("cell--val");
@@ -1622,6 +1752,7 @@ function renderSongView({ force = false } = {}) {
   }
   elSongView.appendChild(list);
   if (activeScreen === "S") syncGhostSelectToSelection();
+  renderNavMap();
 }
 
 function renderChainView({ force = false } = {}) {
@@ -1678,10 +1809,29 @@ function renderChainView({ force = false } = {}) {
   }
   elChainView.appendChild(list);
   if (activeScreen === "C") syncGhostSelectToSelection();
+  renderNavMap();
 }
 
 function setActiveScreen(next) {
   if (!next || !SCREEN_NAMES[next] || next === activeScreen) return;
+
+  if (next === "I") {
+    if (activeScreen === "S" || activeScreen === "C") {
+      setStatus("Open Phrase and focus a filled INST cell to edit an instrument.");
+      return;
+    }
+    if (activeScreen === "P") {
+      if (!phraseCursorOnFilledInstColumn()) {
+        setStatus("Focus a filled INST cell to open Instrument.");
+        flashBlockedSelection();
+        return;
+      }
+      const id = normalizeInstr(currentPhrase().steps[selRow].instr);
+      instrumentTargetIndex = id;
+      state.activeInstrumentId = id;
+    }
+  }
+
   activeScreen = next;
   state.selectionAnchor = null;
   state.selectedRange = null;
@@ -1818,9 +1968,50 @@ function drillUp() {
 
 function renderNavMap() {
   if (!elNavMap) return;
+
+  const onS = activeScreen === "S";
+  const onC = activeScreen === "C";
+  const onP = activeScreen === "P";
+  const onI = activeScreen === "I";
+
+  const rangeBlock = rangeSelectionBlocksDrill();
+  const cid = onS ? getSelectedChainIdFromSong() : null;
+  const pid = onC ? getSelectedPhraseIdFromChain() : null;
+
+  const chainCellOk = onS && cid != null && !rangeBlock;
+  const phraseCellOk = onC && pid != null && !rangeBlock;
+
+  const instrDrillOk = phraseCursorOnFilledInstColumn();
+
   for (const btn of elNavMap.querySelectorAll(".navmap__btn")) {
     const scr = btn.getAttribute("data-screen");
     btn.classList.toggle("navmap__btn--active", scr != null && scr === activeScreen);
+    btn.classList.remove("btn--disabled");
+    btn.removeAttribute("aria-disabled");
+    btn.disabled = false;
+
+    if (scr === "C") {
+      const dead = !(chainCellOk || onC);
+      if (dead) {
+        btn.classList.add("btn--disabled");
+        btn.setAttribute("aria-disabled", "true");
+        btn.disabled = true;
+      }
+    } else if (scr === "P") {
+      const dead = !(phraseCellOk || onP);
+      if (dead) {
+        btn.classList.add("btn--disabled");
+        btn.setAttribute("aria-disabled", "true");
+        btn.disabled = true;
+      }
+    } else if (scr === "I") {
+      const dead = !(instrDrillOk || onI);
+      if (dead) {
+        btn.classList.add("btn--disabled");
+        btn.setAttribute("aria-disabled", "true");
+        btn.disabled = true;
+      }
+    }
   }
 }
 
@@ -1848,14 +2039,15 @@ function handleNavClick(targetScreen) {
         return;
       }
       const cid = getSelectedChainIdFromSong();
-      if (cid != null) {
-        activeChainId = cid;
-        if (!state.chains[activeChainId]) state.chains[activeChainId] = Array.from({ length: ROWS }, () => emptyChainRow());
-        setActiveScreen("C");
+      if (cid == null) {
+        setStatus("Select a non-empty chain cell to open Chain view.");
         return;
       }
+      activeChainId = cid;
+      if (!state.chains[activeChainId]) state.chains[activeChainId] = Array.from({ length: ROWS }, () => emptyChainRow());
+      setActiveScreen("C");
+      return;
     }
-    setActiveScreen("C");
     return;
   }
   if (targetScreen === "P") {
@@ -1865,16 +2057,17 @@ function handleNavClick(targetScreen) {
         return;
       }
       const pid = getSelectedPhraseIdFromChain();
-      if (pid != null) {
-        activePhraseId = pid;
-        if (!state.phrases[activePhraseId]) {
-          state.phrases[activePhraseId] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: null, cmd: null, val: null })) };
-        }
-        setActiveScreen("P");
+      if (pid == null) {
+        setStatus("Select a non-empty phrase (PHR) to open Phrase view.");
         return;
       }
+      activePhraseId = pid;
+      if (!state.phrases[activePhraseId]) {
+        state.phrases[activePhraseId] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: null, cmd: null, val: null })) };
+      }
+      setActiveScreen("P");
+      return;
     }
-    setActiveScreen("P");
     return;
   }
   if (targetScreen === "I") {
@@ -1928,6 +2121,19 @@ function applySelectionUI() {
   if (sel) sel.classList.add("cell--selected");
   setStatusCursor();
   syncGhostSelectToSelection();
+  refreshPhraseEditStatus();
+  renderNavMap();
+}
+
+function refreshPhraseEditStatus() {
+  if (activeScreen !== "P") return;
+  const step = currentPhrase().steps[selRow];
+  const label = COLS[selCol]?.label ?? "Cell";
+  if (normalizeNote(step.note) && !phraseStepHasInstrument(step)) {
+    setStatus(`${label} @ ${rowHex(selRow)} · No instrument assigned — this step will not sound.`);
+  } else {
+    setStatus(`${label} @ ${rowHex(selRow)}.`);
+  }
 }
 
 function applyPlayheadUI() {
@@ -2071,9 +2277,20 @@ function clampByte(v) {
 
 function applyCmdDeltaToStep(step, deltaSign) {
   const prev = normalizeCmd(step.cmd);
-  const idx = CMD_ORDER.indexOf(prev);
-  const at = idx >= 0 ? idx : 0;
-  const next = CMD_ORDER[(at + deltaSign + CMD_ORDER.length) % CMD_ORDER.length];
+  const cycle = PHRASE_CMD_CYCLE;
+  const d = deltaSign > 0 ? 1 : -1;
+  let next = null;
+  if (prev == null) {
+    next = d > 0 ? cycle[0] : cycle[cycle.length - 1];
+  } else {
+    let i = cycle.indexOf(prev);
+    if (i < 0) i = 0;
+    if (d > 0) {
+      next = i === cycle.length - 1 ? null : cycle[i + 1];
+    } else {
+      next = i === 0 ? null : cycle[i - 1];
+    }
+  }
   step.cmd = next;
   ensureValSemantics(step);
   if (engineReady && prev === "O" && next !== "O") immediateCenterPanForStep(step);
@@ -2334,19 +2551,67 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
     const isJump = action.startsWith("jump");
 
     if (colKey === "note") {
-      const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
+      const prevNote = step.note;
+      if (isRandom) {
+        const parsed = parseNote(step.note) ?? { idx: 0, octave: 3 };
+        step.note = makeNote(
+          partsFromNoteNumber(noteNumberFromParts({ idx: randomInt(0, 11), octave: parsed.octave })),
+        );
+        assignActiveInstrumentOnNewNote(step, prevNote);
+        return;
+      }
+      if (!normalizeNote(step.note)) {
+        phraseNudgeNoteFromEmpty(step, sign, isJump, prevNote);
+        return;
+      }
+      const stepSz = sign * (isJump ? 12 : 1);
+      const parsed = parseNote(step.note);
+      if (!parsed) return;
       const startN = noteNumberFromParts(parsed);
-      const nextN = isRandom
-        ? noteNumberFromParts({ idx: randomInt(0, 11), octave: parsed.octave })
-        : startN + sign * (isJump ? 12 : 1);
+      if (stepSz > 0 && startN >= PHRASE_NOTE_NUM_MAX) {
+        step.note = "";
+        return;
+      }
+      if (stepSz < 0 && startN <= PHRASE_NOTE_NUM_MIN) {
+        step.note = "";
+        return;
+      }
+      const nextN = startN + stepSz;
+      if (nextN > PHRASE_NOTE_NUM_MAX || nextN < PHRASE_NOTE_NUM_MIN) {
+        step.note = "";
+        return;
+      }
       step.note = makeNote(partsFromNoteNumber(nextN));
+      assignActiveInstrumentOnNewNote(step, prevNote);
       return;
     }
 
     if (colKey === "instr") {
-      const start = step.instr == null ? 0 : clamp(step.instr | 0, 0, 31);
-      const next = isRandom ? randomInt(0, 31) : clamp(start + sign * (isJump ? 16 : 1), 0, 31);
-      step.instr = next;
+      if (isRandom) {
+        step.instr = randomInt(0, 31);
+        return;
+      }
+      if (step.instr == null) {
+        if (!isJump) {
+          step.instr = sign > 0 ? 0 : 0x1f;
+        } else {
+          step.instr = clamp((sign > 0 ? 0 : 0x1f) + sign * 16, 0, 31);
+        }
+        return;
+      }
+      const start = clamp(step.instr | 0, 0, 31);
+      const delta = sign * (isJump ? 16 : 1);
+      if (sign > 0 && start >= 0x1f) {
+        step.instr = null;
+        return;
+      }
+      if (sign < 0 && start <= 0) {
+        step.instr = null;
+        return;
+      }
+      const raw = start + delta;
+      if (raw < 0 || raw > 31) step.instr = null;
+      else step.instr = raw;
       return;
     }
 
@@ -2515,8 +2780,23 @@ function applyByteDelta(field, delta) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
   if (field === "instr") {
-    const cur = step.instr == null ? 0 : clamp(step.instr | 0, 0, 31);
-    const next = clamp(cur + delta, 0, 31);
+    let next;
+    if (step.instr == null) {
+      if (delta === 1) next = 0;
+      else if (delta === -1) next = 0x1f;
+      else if (delta === 16) next = clamp(0 + 16, 0, 31);
+      else if (delta === -16) next = clamp(0x1f - 16, 0, 31);
+      else next = clamp((delta > 0 ? 0 : 0x1f) + delta, 0, 31);
+    } else {
+      const cur = clamp(step.instr | 0, 0, 31);
+      if (delta > 0 && cur === 0x1f) next = null;
+      else if (delta < 0 && cur === 0) next = null;
+      else {
+        const raw = cur + delta;
+        if (raw < 0 || raw > 31) next = null;
+        else next = raw;
+      }
+    }
     step.instr = next;
     saveState();
     renderTracker();
@@ -2535,24 +2815,10 @@ function applyByteDelta(field, delta) {
 function applyCmdDelta(delta) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
-  const prev = normalizeCmd(step.cmd);
-  const idx = CMD_ORDER.indexOf(prev);
-  const at = idx >= 0 ? idx : 0;
-  const next = CMD_ORDER[(at + delta + CMD_ORDER.length) % CMD_ORDER.length];
-  step.cmd = next;
-  ensureValSemantics(step);
+  applyCmdDeltaToStep(step, delta);
+  const next = normalizeCmd(step.cmd);
   saveState();
   renderTracker();
-  // If leaving 'O', reset channel pan to center immediately (engine/UI consistency).
-  if (engineReady && prev === "O" && next !== "O") {
-    const channel = instrToChannel(step.instr);
-    const panner =
-      channel === 0 ? panPulse1 :
-      channel === 1 ? panPulse2 :
-      channel === 2 ? panWave :
-      panNoise;
-    if (panner?.pan?.value != null) panner.pan.value = 0;
-  }
   setStatus(`Cmd @ ${rowHex(selRow)} = ${next ?? "--"}`);
 }
 
@@ -2673,7 +2939,9 @@ function writeCellValueAt(screen, r, c, payload) {
   }
   const step = currentPhrase().steps[row];
   if (payload.type === "phrase.note") {
+    const prevNote = step.note;
     step.note = normalizeNote(String(payload.value ?? "")) || "";
+    assignActiveInstrumentOnNewNote(step, prevNote);
     return true;
   }
   if (payload.type === "phrase.instr") {
@@ -2786,6 +3054,7 @@ function refreshRangeGridRenders() {
   else if (activeScreen === "S") renderSongView({ force: true });
   else if (activeScreen === "C") renderChainView({ force: true });
   else if (activeScreen === "I") renderInstrumentView();
+  renderNavMap();
 }
 
 function clearTransientGridSelection() {
@@ -3059,7 +3328,9 @@ function writeCurrentCellValue({ type, value }) {
   // Phrase
   const step = currentPhrase().steps[selRow];
   if (type === "phrase.note") {
+    const prevNote = step.note;
     step.note = normalizeNote(String(value ?? "")) || "";
+    assignActiveInstrumentOnNewNote(step, prevNote);
     saveState();
     renderTracker({ force: true });
     setStatus(`Set NOTE = ${step.note || "--"}`);
@@ -3118,10 +3389,37 @@ function getSelectedCellElement() {
 function applyNoteSemitoneDelta(delta) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
-  const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
+  const prevNote = step.note;
+  const d = Number(delta) || 0;
+  if (!normalizeNote(step.note)) {
+    if (d > 0) step.note = PHRASE_NOTE_EMPTY_UP;
+    else step.note = makeNote(partsFromNoteNumber(PHRASE_NOTE_NUM_MAX));
+    assignActiveInstrumentOnNewNote(step, prevNote);
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
+    return;
+  }
+  const parsed = parseNote(step.note);
+  if (!parsed) return;
   const start = noteNumberFromParts(parsed);
-  const next = partsFromNoteNumber(start + (Number(delta) || 0));
+  if (d > 0 && start >= PHRASE_NOTE_NUM_MAX) {
+    step.note = "";
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
+    return;
+  }
+  if (d < 0 && start <= PHRASE_NOTE_NUM_MIN) {
+    step.note = "";
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
+    return;
+  }
+  const next = partsFromNoteNumber(start + d);
   step.note = makeNote(next);
+  assignActiveInstrumentOnNewNote(step, prevNote);
   saveState();
   renderTracker();
   setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
@@ -3130,10 +3428,45 @@ function applyNoteSemitoneDelta(delta) {
 function applyNoteOctaveDelta(delta) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
-  const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
+  const prevNote = step.note;
+  const d = Number(delta) || 0;
+  if (!normalizeNote(step.note)) {
+    const base = d > 0 ? noteNumberFromParts(parseNote(PHRASE_NOTE_EMPTY_UP) ?? { idx: 0, octave: 3 }) : PHRASE_NOTE_NUM_MAX;
+    const nextN = clamp(base + 12 * d, PHRASE_NOTE_NUM_MIN, PHRASE_NOTE_NUM_MAX);
+    step.note = makeNote(partsFromNoteNumber(nextN));
+    assignActiveInstrumentOnNewNote(step, prevNote);
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
+    return;
+  }
+  const parsed = parseNote(step.note);
+  if (!parsed) return;
   const start = noteNumberFromParts(parsed);
-  const next = partsFromNoteNumber(start + 12 * (Number(delta) || 0));
-  step.note = makeNote(next);
+  if (d > 0 && start >= PHRASE_NOTE_NUM_MAX) {
+    step.note = "";
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
+    return;
+  }
+  if (d < 0 && start <= PHRASE_NOTE_NUM_MIN) {
+    step.note = "";
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
+    return;
+  }
+  const nextN = start + 12 * d;
+  if (nextN > PHRASE_NOTE_NUM_MAX || nextN < PHRASE_NOTE_NUM_MIN) {
+    step.note = "";
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
+    return;
+  }
+  step.note = makeNote(partsFromNoteNumber(nextN));
+  assignActiveInstrumentOnNewNote(step, prevNote);
   saveState();
   renderTracker();
   setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
@@ -3142,12 +3475,34 @@ function applyNoteOctaveDelta(delta) {
 function applyNoteDelta({ pitchDelta = 0, octaveDelta = 0 }) {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
-  const parsed = parseNote(step.note) ?? { idx: 0, octave: 4 };
-  const next = {
-    idx: parsed.idx + pitchDelta,
-    octave: clamp(parsed.octave + octaveDelta, 0, 8),
-  };
-  step.note = makeNote(next);
+  const prevNote = step.note;
+  const net = (Number(pitchDelta) || 0) + 12 * (Number(octaveDelta) || 0);
+  if (!normalizeNote(step.note)) {
+    const baseN =
+      net >= 0
+        ? noteNumberFromParts(parseNote(PHRASE_NOTE_EMPTY_UP) ?? { idx: 0, octave: 3 })
+        : PHRASE_NOTE_NUM_MAX;
+    const nextN = clamp(baseN + net, PHRASE_NOTE_NUM_MIN, PHRASE_NOTE_NUM_MAX);
+    step.note = makeNote(partsFromNoteNumber(nextN));
+    assignActiveInstrumentOnNewNote(step, prevNote);
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
+    return;
+  }
+  const parsed = parseNote(step.note);
+  if (!parsed) return;
+  const startN = noteNumberFromParts(parsed);
+  const nextN = startN + net;
+  if (nextN > PHRASE_NOTE_NUM_MAX || nextN < PHRASE_NOTE_NUM_MIN) {
+    step.note = "";
+    saveState();
+    renderTracker();
+    setStatus(`NOTE @ ${rowHex(selRow)} = --`);
+    return;
+  }
+  step.note = makeNote(partsFromNoteNumber(nextN));
+  assignActiveInstrumentOnNewNote(step, prevNote);
   saveState();
   renderTracker();
   setStatus(`NOTE @ ${rowHex(selRow)} = ${step.note}`);
@@ -3551,12 +3906,57 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   if (!step) return;
   const transposeSemis = Number.isFinite(opts.transposeSemis) ? opts.transposeSemis : 0;
   const cmd = normalizeCmd(step.cmd);
-  if (!step.note && cmd !== "D" && cmd !== "T") return;
+  const valByte = step.val;
+  const hasInstr = phraseStepHasInstrument(step);
 
-  const instrumentId = safeInstrumentId(step.instr);
+  if (!step.note && cmd !== "D" && cmd !== "T" && cmd !== "K") return;
+
+  const tickAudioNow = Number.isFinite(opts.tickAudioNow)
+    ? opts.tickAudioNow
+    : (Tone.getContext()?.rawContext?.currentTime ?? time);
+
+  // Note cut (K): always runs, even with INST = — (per-channel in Song mode, all gates in Phrase/Chain).
+  if (cmd === "K") {
+    const now = tickAudioNow;
+    const minSafe = Math.max(time, now + 0.004);
+    const lag = minAutomationLagSeconds();
+    if (Number.isFinite(opts.channelOverride)) {
+      const ch = clamp(opts.channelOverride | 0, 0, 3);
+      const prevSafe = lastTriggerSafeTimeByChannel[ch];
+      const safeTime = Math.max(minSafe, prevSafe + lag);
+      lastTriggerSafeTimeByChannel[ch] = safeTime;
+      fastMuteGateAtTime(channelGain(ch), safeTime);
+      heldNoteByChannel[ch] = false;
+      gateSilentAfterByChannel[ch] = safeTime;
+    } else {
+      let safeTime = minSafe;
+      for (let c = 0; c < 4; c++) {
+        safeTime = Math.max(safeTime, lastTriggerSafeTimeByChannel[c] + lag);
+      }
+      for (let c = 0; c < 4; c++) {
+        lastTriggerSafeTimeByChannel[c] = safeTime;
+        fastMuteGateAtTime(channelGain(c), safeTime);
+        heldNoteByChannel[c] = false;
+        gateSilentAfterByChannel[c] = safeTime;
+      }
+    }
+    return;
+  }
+
+  // Strict instrument: no INST = no audio (tempo T still allowed below).
+  if (!hasInstr) {
+    if (cmd === "T") {
+      const raw = valByte == null ? state.bpm : clamp(valByte | 0, 0, 255);
+      const bpm = clamp(raw, BPM_RANGE_MIN, BPM_RANGE_MAX);
+      if (Tone.Transport?.bpm?.setValueAtTime) Tone.Transport.bpm.setValueAtTime(bpm, time);
+      else if (Tone.Transport?.bpm?.value != null) Tone.Transport.bpm.value = bpm;
+    }
+    return;
+  }
+
+  const instrumentId = clamp(step.instr | 0, 0, 31);
   const instrument = getInstrumentById(instrumentId);
   const channel = Number.isFinite(opts.channelOverride) ? clamp(opts.channelOverride | 0, 0, 3) : instrToChannel(instrumentId);
-  const valByte = step.val;
 
   let vel = 0.9;
   if (cmd === "V") vel = cmdVolumeToVelocity(valByte);
@@ -3575,11 +3975,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
 
   // Clean Trigger sequence (timing-hardened):
   // Some callbacks arrive extremely close to `audioContext.currentTime`, so NEVER schedule in the past.
-  // `tickAudioNow` (when provided) is one sample of the clock for this Transport tick — stable if UI blocks
-  // and several steps run back-to-back with the same underlying `currentTime`.
-  const now = Number.isFinite(opts.tickAudioNow)
-    ? opts.tickAudioNow
-    : (Tone.getContext()?.rawContext?.currentTime ?? time);
+  const now = tickAudioNow;
   const chSafe = clamp(channel | 0, 0, 3);
   const minSafe = Math.max(time, now + 0.004); // safety margin to avoid “near-now” reordering artifacts
   const lag = minAutomationLagSeconds();
@@ -3599,6 +3995,30 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   }
   lastTriggerSafeTimeByChannel[chSafe] = safeTime;
   const g = channelGain(channel);
+
+  if (audioTimingDebugEnabled()) {
+    const envLookAheadSec = 0.002 + 0.002; // scheduleInstrumentEnvelopeAtTime: lookAhead + attack
+    const orderBumpSec = Math.max(0, safeTime - minSafe);
+    audioTimingLog({
+      where: "triggerStep.timing",
+      ch: chSafe,
+      transportT: fmtTime(time),
+      audioNowT: fmtTime(now),
+      skewAudioMinusTransportMs: Math.round((now - time) * 1000),
+      minSafeT: fmtTime(minSafe),
+      safeT: fmtTime(safeTime),
+      slipGridMs: Math.round((safeTime - time) * 1000),
+      marginNowPlus4msMs: Math.round((minSafe - time) * 1000),
+      orderBumpMs: Math.round(orderBumpSec * 1000),
+      minVoiceLagMs: Math.round(lag * 1000),
+      gateOpensAboutMsAfterTransport: Math.round((safeTime + envLookAheadSec - time) * 1000),
+      outLatMs: Math.round(getOutputLatencySeconds() * 1000),
+      uiOffsetMs: Number(state.visualOffsetMs) || 0,
+      note: step.note || "--",
+      cmd,
+      songCol: Number.isFinite(opts.channelOverride) ? opts.channelOverride : null,
+    });
+  }
 
   if (audioDebugTriggerCount < 5) {
     audioDebugLogCritical({
@@ -3864,13 +4284,13 @@ function startPhrasePlayback() {
   let idx = 0;
 
   stepEventId = Tone.Transport.scheduleRepeat((time) => {
+    const tickAudioNow = Tone.getContext()?.rawContext?.currentTime ?? time;
+    logTransportCallbackTiming("P", time, tickAudioNow);
     if (idx === 0) audioDebugLogCritical({ where: "transport.tick", mode: "P", time });
     // IMPORTANT: `time` from Tone.Transport is not necessarily the same clock as `rawContext.currentTime`.
     // Anchor the playhead in the *same* time domain as `updatePhrasePlayheadFromVisualTime` (visualTime),
     // using the same "safeTime" we schedule notes at.
     if (phrasePlayheadAnchorTime == null) {
-      const raw = Tone.getContext()?.rawContext;
-      const tickAudioNow = raw?.currentTime ?? time;
       const totalDelay = getTotalPlayheadDelaySeconds();
       const safeTime0 = Math.max(time, tickAudioNow + 0.004);
       phrasePlayheadAnchorTime = safeTime0 - totalDelay;
@@ -3886,7 +4306,6 @@ function startPhrasePlayback() {
     const row = idx % ROWS;
 
     const step = currentPhrase().steps[row];
-    const tickAudioNow = Tone.getContext()?.rawContext?.currentTime ?? time;
     triggerStep(step, time, stepDur, { tickAudioNow });
 
     idx++;
@@ -3921,6 +4340,7 @@ function startChainPlayback() {
 
   stepEventId = Tone.Transport.scheduleRepeat((time) => {
     const tickAudioNow = Tone.getContext()?.rawContext?.currentTime ?? time;
+    logTransportCallbackTiming("C", time, tickAudioNow);
     try {
       const chain = state.chains?.[activeChainId] ?? [];
       let entry = normalizeChainRow(chain[chainRow]);
@@ -3983,6 +4403,7 @@ function startSongPlayback() {
 
   stepEventId = Tone.Transport.scheduleRepeat((time) => {
     const tickAudioNow = Tone.getContext()?.rawContext?.currentTime ?? time;
+    logTransportCallbackTiming("S", time, tickAudioNow);
     try {
       const songEntry = state.song?.[songRow];
       const chainIds = Array.isArray(songEntry) ? songEntry : SONG_COLS.map((_, c) => (c === 0 ? songEntry : null));
@@ -4420,6 +4841,7 @@ function initUI() {
       if (scr) handleNavClick(scr);
     });
     btn.addEventListener("touchend", (e) => {
+      if (btn.disabled || btn.getAttribute("aria-disabled") === "true") return;
       e.preventDefault();
       const scr = btn.getAttribute("data-screen");
       if (scr) handleNavClick(scr);
