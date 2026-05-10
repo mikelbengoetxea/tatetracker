@@ -1419,7 +1419,7 @@ const SCREEN_NAMES = {
   I: "Instrument",
   T: "Table",
 };
-let activeScreen = "P";
+let activeScreen = "S";
 let activeChainId = 0x00;
 let activePhraseId = 0x00;
 
@@ -1812,10 +1812,12 @@ function renderChainView({ force = false } = {}) {
   renderNavMap();
 }
 
-function setActiveScreen(next) {
-  if (!next || !SCREEN_NAMES[next] || next === activeScreen) return;
+function setActiveScreen(next, { force = false } = {}) {
+  if (!next || !SCREEN_NAMES[next]) return;
+  const isChange = next !== activeScreen;
+  if (!isChange && !force) return;
 
-  if (next === "I") {
+  if (isChange && next === "I") {
     if (activeScreen === "S" || activeScreen === "C") {
       setStatus("Open Phrase and focus a filled INST cell to edit an instrument.");
       return;
@@ -4708,7 +4710,7 @@ function afterProjectLoaded(msg) {
     state.phrases[activePhraseId] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: null, cmd: null, val: null })) };
   }
 
-  setActiveScreen(activeScreen);
+  setActiveScreen(activeScreen, { force: true });
   // Force all views to reflect new global state immediately.
   renderTracker({ force: true });
   renderSongView({ force: true });
@@ -4733,7 +4735,7 @@ function resetProject() {
   chainSelCol = 0;
   activeChainId = 0x00;
   activePhraseId = 0x00;
-  activeScreen = "P";
+  activeScreen = "S";
   instrumentTargetIndex = 0;
   instSelRow = 0;
   instSelCol = 1;
@@ -5258,8 +5260,8 @@ function initUI() {
   window.visualViewport?.addEventListener("scroll", scheduleGhostSync, { passive: true });
 }
 
-renderTracker();
 initUI();
+setActiveScreen(activeScreen, { force: true });
 syncGhostSelectToSelection();
 setStatusCursor();
 focusMain();
