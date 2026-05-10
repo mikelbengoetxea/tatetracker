@@ -366,10 +366,16 @@ function normalizeNote(s) {
 }
 
 const NOTE_PITCHES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-const CMD_SET = new Set(["V", "P", "O", "D", "A", "W", "T", "K"]);
-const CMD_ORDER = [null, "V", "P", "O", "D", "A", "W", "T", "K"];
-/** Non-null command cycle: `--` sits between `K` (wrap down) and `V` (wrap up). */
-const PHRASE_CMD_CYCLE = ["V", "P", "O", "D", "A", "W", "T", "K"];
+/** LSDJ-style tick commands (mutually exclusive per step). */
+const CMD_SET = new Set(["C", "D", "E", "L", "P", "R", "S", "V", "W"]);
+const CMD_ORDER = [null, "C", "D", "E", "L", "P", "R", "S", "V", "W"];
+/** Nudge / cycle order (no `--` in array; null handled separately in `applyCmdDeltaToStep`). */
+const PHRASE_CMD_CYCLE = ["C", "D", "E", "L", "P", "R", "S", "V", "W"];
+/** Subdivisions per phrase step (one Transport hit = one row). */
+const TICKS_PER_STEP = 6;
+/** Vibrato depth in semitones by CMD `V` low nibble. */
+const VIBRATO_DEPTH_SEMITONES = [0, 0.125, 0.25, 0.375, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5];
+const POLY_LOOKAHEAD_SEC = 0.002;
 const PHRASE_NOTE_NUM_MIN = 0;
 const PHRASE_NOTE_NUM_MAX = 8 * 12 + 11; // B8
 /** First note set when nudging from an empty cell (UI `---`); matches common “C3” anchor. */
@@ -385,12 +391,7 @@ function normalizeCmd(value) {
     if (t === "" || t === "--" || t === ".") return null;
     return CMD_SET.has(t) ? t : null;
   }
-  // Legacy numeric codes (kept for backward compatibility)
   if (typeof value === "number" && Number.isFinite(value)) {
-    const v = clamp(value | 0, 0, 255);
-    if (v === 0x01) return "V";
-    if (v === 0x02) return "P";
-    if (v === 0x03) return "D";
     return null;
   }
   return null;
@@ -669,6 +670,8 @@ let oscStealPending = [null, null, null, null];
 let lastTriggerSafeTimeByChannel = [0, 0, 0, 0];
 /** Estimated time when the channel gate is near-silent again (used to decide whether to phase-reset poly voice). */
 let gateSilentAfterByChannel = [0, 0, 0, 0];
+/** Last note string played per channel (for `L` slide from previous step). */
+let lastPlayedNoteByChannel = [null, null, null, null];
 
 /** Minimum spacing between triggers on one channel (~one render quantum) so Web Audio automation + voice-steal stay ordered. */
 function minAutomationLagSeconds() {
@@ -719,6 +722,10 @@ function resetPerChannelTriggerSafeTimes() {
   gateSilentAfterByChannel[1] = 0;
   gateSilentAfterByChannel[2] = 0;
   gateSilentAfterByChannel[3] = 0;
+  lastPlayedNoteByChannel[0] = null;
+  lastPlayedNoteByChannel[1] = null;
+  lastPlayedNoteByChannel[2] = null;
+  lastPlayedNoteByChannel[3] = null;
 }
 let oscGainPulse1 = null; // GainNode (per-osc; used for wiring but no crossfade)
 let oscGainPulse2 = null;
@@ -1225,7 +1232,7 @@ function applyInstrumentToChannelAtTime(channel, instrument, time) {
     // Noise flavor not implemented yet for raw buffer noise (future).
   }
 
-  // Output (pan) is set per-trigger in triggerStep to allow CMD 'O' override.
+  // Output (pan) is set per-trigger from the instrument unless a command overrides timbre.
 }
 
 function resetChannelPitchStateAtTime(channel, time) {
@@ -1287,11 +1294,12 @@ function forceChannelReleaseAtTime(channel, time) {
   heldNoteByChannel[ch] = false;
 }
 
-function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) {
+function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec, gainMul = 1) {
   const ch = clamp(channel | 0, 0, 3);
   const g = channelGain(ch);
   if (!g?.gain) return;
   const ins = instrument || defaultInstrumentObject(0);
+  const mul = clamp(Number(gainMul) || 1, 0, 4);
   // Keep attack fast (pluck-friendly) while still click-safe.
   const lookAheadSec = 0.002;
   const attackSec = 0.002;
@@ -1300,7 +1308,7 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
   const env1 = clamp((ins.env1 ?? 0) | 0, 0, 0x0f);
   const env2 = clamp((ins.env2 ?? 0) | 0, 0, 0x01);
   const env3 = clamp((ins.env3 ?? 0) | 0, 0, 0x0f);
-  const initial = clamp(env1 / 15, 0, 1);
+  const initial = clamp((env1 / 15) * mul, 0, 1);
   const fadeOut = env2 === 0;
   // ENV3 speed: 0..F maps to 0..3s.
   const nib = env3;
@@ -1349,7 +1357,7 @@ function scheduleInstrumentEnvelopeAtTime(channel, instrument, time, lengthSec) 
         else if (g.gain.exponentialRampToValueAtTime) g.gain.exponentialRampToValueAtTime(floor, tOpen + envDur);
         else if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(0, tOpen + envDur);
       } else {
-        const upTarget = clamp(start + 0.08, floor, 1);
+        const upTarget = clamp(start + 0.08 * mul, floor, 1);
         if (g.gain.setTargetAtTime) g.gain.setTargetAtTime(upTarget, tOpen, Math.max(0.01, envDur / 4));
         else if (g.gain.linearRampToValueAtTime) g.gain.linearRampToValueAtTime(upTarget, tOpen + envDur);
       }
@@ -2146,11 +2154,17 @@ function refreshPhraseEditStatus() {
   if (activeScreen !== "P") return;
   const step = currentPhrase().steps[selRow];
   const label = COLS[selCol]?.label ?? "Cell";
+  const colKey = COLS[selCol]?.key;
   if (normalizeNote(step.note) && !phraseStepHasInstrument(step)) {
     setStatus(`${label} @ ${rowHex(selRow)} · No instrument assigned — this step will not sound.`);
-  } else {
-    setStatus(`${label} @ ${rowHex(selRow)}.`);
+    return;
   }
+  let hint = "";
+  if (colKey === "cmd" || colKey === "val") {
+    const c = normalizeCmd(step.cmd);
+    if (c) hint = ` · ${phraseCmdShortDescription(c)}`;
+  }
+  setStatus(`${label} @ ${rowHex(selRow)}${hint}.`);
 }
 
 function applyPlayheadUI() {
@@ -2313,7 +2327,6 @@ function applyCmdDeltaToStep(step, deltaSign) {
   }
   step.cmd = next;
   ensureValSemantics(step);
-  if (engineReady && prev === "O" && next !== "O") immediateCenterPanForStep(step);
 }
 
 function nudgeBarSign(action) {
@@ -2884,7 +2897,11 @@ function applyByteDelta(field, delta) {
   if (field === "instr") {
     setStatus(`${COLS[selCol].label} @ ${rowHex(selRow)} = ${displayInstr(step.instr)}`);
   } else {
-    setStatus(`${COLS[selCol].label} @ ${rowHex(selRow)} = ${displayByte(step.val, { kind: "hex" })}`);
+    const c = normalizeCmd(step.cmd);
+    setStatus(
+      `${COLS[selCol].label} @ ${rowHex(selRow)} = ${displayByte(step.val, { kind: "hex" })}` +
+        (c ? ` · ${phraseCmdShortDescription(c)}` : ""),
+    );
   }
 }
 
@@ -2895,18 +2912,8 @@ function applyCmdDelta(delta) {
   const next = normalizeCmd(step.cmd);
   saveState();
   renderTracker();
-  setStatus(`Cmd @ ${rowHex(selRow)} = ${next ?? "--"}`);
-}
-
-function immediateCenterPanForStep(step) {
-  if (!engineReady) return;
-  const channel = instrToChannel(step?.instr);
-  const panner =
-    channel === 0 ? panPulse1 :
-    channel === 1 ? panPulse2 :
-    channel === 2 ? panWave :
-    panNoise;
-  if (panner?.pan?.value != null) panner.pan.value = 0;
+  const help = next ? phraseCmdShortDescription(next) : "";
+  setStatus(`Cmd @ ${rowHex(selRow)} = ${next ?? "--"}${help ? ` · ${help}` : ""}`);
 }
 
 function cellTypeForGrid(screen, col, rowHint = 0) {
@@ -3029,7 +3036,6 @@ function writeCellValueAt(screen, r, c, payload) {
     const next = normalizeCmd(payload.value);
     step.cmd = next;
     ensureValSemantics(step);
-    if (prev === "O" && next !== "O") immediateCenterPanForStep(step);
     return true;
   }
   if (payload.type === "phrase.val") {
@@ -3426,8 +3432,8 @@ function writeCurrentCellValue({ type, value }) {
     ensureValSemantics(step);
     saveState();
     renderTracker({ force: true });
-    if (prev === "O" && next !== "O") immediateCenterPanForStep(step);
-    setStatus(`Set CMD = ${next ?? "--"}`);
+    const help = next ? phraseCmdShortDescription(next) : "";
+    setStatus(`Set CMD = ${next ?? "--"}${help ? ` · ${help}` : ""}`);
     return true;
   }
   if (type === "phrase.val") {
@@ -3435,7 +3441,10 @@ function writeCurrentCellValue({ type, value }) {
     ensureValSemantics(step);
     saveState();
     renderTracker({ force: true });
-    setStatus(`Set VAL = ${displayValForStep(step)}`);
+    const c = normalizeCmd(step.cmd);
+    setStatus(
+      `Set VAL = ${displayValForStep(step)}` + (c ? ` · ${phraseCmdShortDescription(c)}` : ""),
+    );
     return true;
   }
   return false;
@@ -3832,35 +3841,6 @@ function instrToChannel(instrHex) {
   return 3; // Noise
 }
 
-function cmdVolumeToVelocity(valByte) {
-  const v = valByte == null ? 0x0f : clamp(valByte | 0, 0, 255);
-  const nib = clamp(v & 0x0f, 0, 15);
-  return clamp(nib / 15, 0, 1);
-}
-
-function pitchSignedSemitones(valByte) {
-  if (valByte == null) return 0;
-  const v = clamp(valByte | 0, 0, 255);
-  // Signed int8
-  const signed = v >= 0x80 ? v - 0x100 : v;
-  // Limit to something musical
-  return clamp(signed, -24, 24);
-}
-
-function retriggerCount(valByte) {
-  if (valByte == null) return 0;
-  const v = clamp(valByte | 0, 0, 255);
-  // 01..10 => 1..16 retriggers; 00 => none
-  return clamp(v, 0, 16);
-}
-
-function panFromByte(valByte) {
-  const v = valByte == null ? 0x80 : clamp(valByte | 0, 0, 255);
-  // 00 => -1 (L), 80 => 0 (C), FF => +1 (R)
-  const pan = (v - 0x80) / 0x7f;
-  return clamp(pan, -1, 1);
-}
-
 function widthFromByte(valByte) {
   const v = valByte == null ? 0x02 : clamp(valByte | 0, 0, 255);
   const code = v & 0x03;
@@ -3900,70 +3880,125 @@ function transposeNoteBySemis(note, semis) {
   }
 }
 
+function phraseNoteToString(noteOrFreq) {
+  if (noteOrFreq == null) return "";
+  if (typeof noteOrFreq === "string") return noteOrFreq;
+  try {
+    if (typeof noteOrFreq.toNote === "function") return noteOrFreq.toNote();
+  } catch { /* ignore */ }
+  try {
+    return Tone.Frequency(noteOrFreq).toNote();
+  } catch {
+    return String(noteOrFreq);
+  }
+}
+
+function phraseCmdShortDescription(cmd) {
+  switch (cmd) {
+    case "C": return "Chord: each tick cycles root + two semitone offsets (high/low nibbles).";
+    case "D": return "Delay: wait VAL ticks before opening the gate (6 ticks per step).";
+    case "E": return "Envelope: Pulse/Noise ENV override; Wave gain from low 2 bits (0/25/50/100%).";
+    case "L": return "Slide: linear pitch from previous step’s note to this note.";
+    case "P": return "Pitch bend: signed byte per tick (80–FF negative), cumulative in semitone steps.";
+    case "R": return "Retrig: repeat hit every low-nibble ticks; high nibble = hit level.";
+    case "S": return "Sweep: Pulse/Wave frequency sweep; Noise shifts playback rate.";
+    case "V": return "Vibrato: high nibble rate, low nibble depth (semitone table).";
+    case "W": return "Wave: Pulse duty or Wave shape from low bits.";
+    default: return "";
+  }
+}
+
+function phraseTickBoundarySec(safeTime, stepDurSec, tickIdx) {
+  const k = clamp(tickIdx | 0, 0, TICKS_PER_STEP);
+  return safeTime + (k / TICKS_PER_STEP) * stepDurSec;
+}
+
+function resetCmdModulationAtTime(channel, time) {
+  resetChannelPitchStateAtTime(channel, time);
+  const ch = clamp(channel | 0, 0, 3);
+  if (polyWorklet?.parameters && ch >= 0 && ch <= 2) {
+    try {
+      const p = polyWorklet.parameters.get(polyParamNameForFreq(ch));
+      if (p?.cancelScheduledValues) p.cancelScheduledValues(time);
+    } catch { /* ignore */ }
+  }
+  if (ch === 3 && synthNoise?.playbackRate) {
+    try {
+      if (synthNoise.playbackRate.cancelScheduledValues) synthNoise.playbackRate.cancelScheduledValues(time);
+      synthNoise.playbackRate.setValueAtTime(1, time);
+    } catch { /* ignore */ }
+  }
+}
+
+function applyCmdEnvelopeOverride(instrument, cmd, valByte) {
+  let waveGainMul = 1;
+  if (cmd !== "E" || valByte == null) return { instrument, waveGainMul };
+  const ins = instrument || defaultInstrumentObject(0);
+  const v = clamp(valByte | 0, 0, 255);
+  if (ins.type === 1) {
+    const c = v & 0x03;
+    waveGainMul = c === 0 ? 0 : c === 1 ? 0.25 : c === 2 ? 0.5 : 1;
+    return { instrument: ins, waveGainMul };
+  }
+  const env1 = (v >> 4) & 0x0f;
+  const lo = v & 0x0f;
+  const env2 = (lo >> 3) & 0x01;
+  const env3 = clamp(((lo & 0x07) << 1) | 0x01, 0, 0x0f);
+  return {
+    instrument: { ...ins, env1, env2, env3 },
+    waveGainMul: 1,
+  };
+}
+
+function retrigPulseAtTime(channel, t, volNib) {
+  const peak = clamp(volNib / 15, 0.05, 1);
+  const tAudio = t + POLY_LOOKAHEAD_SEC;
+  const og = channelOscGain(channel);
+  if (og?.gain?.setValueAtTime) {
+    try {
+      og.gain.cancelScheduledValues(tAudio);
+      og.gain.setValueAtTime(peak, tAudio);
+      og.gain.exponentialRampToValueAtTime(1, tAudio + 0.06);
+    } catch { /* ignore */ }
+  } else {
+    const gn = channelGain(channel);
+    if (gn?.gain?.linearRampToValueAtTime) {
+      try {
+        gn.gain.linearRampToValueAtTime(peak, tAudio + 0.004);
+      } catch { /* ignore */ }
+    }
+  }
+  if (polyWorklet && workletReady) {
+    const ch = clamp(channel | 0, 0, 2);
+    polyNoteOnAtTime(ch, tAudio, 72);
+  }
+}
+
 function triggerStep(step, time, stepDurSec, opts = {}) {
   if (!step) return;
   const transposeSemis = Number.isFinite(opts.transposeSemis) ? opts.transposeSemis : 0;
   const cmd = normalizeCmd(step.cmd);
   const valByte = step.val;
   const hasInstr = phraseStepHasInstrument(step);
+  const hasNote = !!normalizeNote(step.note);
 
-  if (!step.note && cmd !== "D" && cmd !== "T" && cmd !== "K") return;
+  if (!hasInstr) return;
 
   const tickAudioNow = Number.isFinite(opts.tickAudioNow)
     ? opts.tickAudioNow
     : (Tone.getContext()?.rawContext?.currentTime ?? time);
 
-  // Note cut (K): always runs, even with INST = — (per-channel in Song mode, all gates in Phrase/Chain).
-  if (cmd === "K") {
-    const now = tickAudioNow;
-    const minSafe = Math.max(time, now + 0.004);
-    const lag = minAutomationLagSeconds();
-    if (Number.isFinite(opts.channelOverride)) {
-      const ch = clamp(opts.channelOverride | 0, 0, 3);
-      const prevSafe = lastTriggerSafeTimeByChannel[ch];
-      const safeTime = Math.max(minSafe, prevSafe + lag);
-      lastTriggerSafeTimeByChannel[ch] = safeTime;
-      fastMuteGateAtTime(channelGain(ch), safeTime);
-      heldNoteByChannel[ch] = false;
-      gateSilentAfterByChannel[ch] = safeTime;
-    } else {
-      let safeTime = minSafe;
-      for (let c = 0; c < 4; c++) {
-        safeTime = Math.max(safeTime, lastTriggerSafeTimeByChannel[c] + lag);
-      }
-      for (let c = 0; c < 4; c++) {
-        lastTriggerSafeTimeByChannel[c] = safeTime;
-        fastMuteGateAtTime(channelGain(c), safeTime);
-        heldNoteByChannel[c] = false;
-        gateSilentAfterByChannel[c] = safeTime;
-      }
-    }
-    return;
-  }
-
-  // Strict instrument: no INST = no audio (tempo T still allowed below).
-  if (!hasInstr) {
-    if (cmd === "T") {
-      const raw = valByte == null ? state.bpm : clamp(valByte | 0, 0, 255);
-      const bpm = clamp(raw, BPM_RANGE_MIN, BPM_RANGE_MAX);
-      if (Tone.Transport?.bpm?.setValueAtTime) Tone.Transport.bpm.setValueAtTime(bpm, time);
-      else if (Tone.Transport?.bpm?.value != null) Tone.Transport.bpm.value = bpm;
-    }
-    return;
-  }
-
   const instrumentId = clamp(step.instr | 0, 0, 31);
   const instrument = getInstrumentById(instrumentId);
   const channel = Number.isFinite(opts.channelOverride) ? clamp(opts.channelOverride | 0, 0, 3) : instrToChannel(instrumentId);
 
-  let vel = 0.9;
-  if (cmd === "V") vel = cmdVolumeToVelocity(valByte);
-
-  const semis = cmd === "P" ? pitchSignedSemitones(valByte) : 0;
+  if (!hasNote) {
+    const okEmpty = cmd === "D" || cmd === "R" || cmd === "E" || (cmd === "S" && channel === 3);
+    if (!okEmpty) return;
+  }
 
   let synth = channelSynth(channel);
-  // In worklet mode, synth nodes are created per-note (so this can start as null for ch 0..2).
-  if (!synth && channel === 3) return;
+  if (!synth && channel !== 3) return;
 
   const panner =
     channel === 0 ? panPulse1 :
@@ -3971,11 +4006,9 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     channel === 2 ? panWave :
     panNoise;
 
-  // Clean Trigger sequence (timing-hardened):
-  // Some callbacks arrive extremely close to `audioContext.currentTime`, so NEVER schedule in the past.
   const now = tickAudioNow;
   const chSafe = clamp(channel | 0, 0, 3);
-  const minSafe = Math.max(time, now + 0.004); // safety margin to avoid “near-now” reordering artifacts
+  const minSafe = Math.max(time, now + 0.004);
   const lag = minAutomationLagSeconds();
   const prevSafe = lastTriggerSafeTimeByChannel[chSafe];
   let safeTime = Math.max(minSafe, prevSafe + lag);
@@ -3995,7 +4028,7 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   const g = channelGain(channel);
 
   if (audioTimingDebugEnabled()) {
-    const envLookAheadSec = 0.002 + 0.002; // scheduleInstrumentEnvelopeAtTime: lookAhead + attack
+    const envLookAheadSec = POLY_LOOKAHEAD_SEC + 0.002;
     const orderBumpSec = Math.max(0, safeTime - minSafe);
     audioTimingLog({
       where: "triggerStep.timing",
@@ -4056,166 +4089,258 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
     },
   });
 
-  // 1) Gate shaping happens inside `scheduleInstrumentEnvelopeAtTime`.
-  // We avoid doing a separate fast-mute here because the envelope scheduler cancels automation at `safeTime`;
-  // that can turn later gate changes (at `t0`) into a discontinuity (click).
-
-  // 2) Reset pitch/table state before we open the envelope.
-  resetChannelPitchStateAtTime(channel, safeTime);
+  resetCmdModulationAtTime(channel, safeTime);
   forceChannelReleaseAtTime(channel, safeTime);
 
-  // Apply instrument MODE immediately for this trigger.
+  const { instrument: envSourceIns, waveGainMul } = applyCmdEnvelopeOverride(instrument, cmd, valByte);
+
   applyInstrumentToChannelAtTime(channel, instrument, safeTime);
 
-  // Output pan: instrument default unless CMD 'O' explicitly sets it.
-  const nextPan = cmd === "O" ? panFromByte(valByte) : panFromOutput(instrument.output);
-  if (panner?.pan?.setValueAtTime) {
-    panner.pan.setValueAtTime(nextPan, safeTime);
-  } else if (panner?.pan?.value != null) {
-    panner.pan.value = nextPan;
+  const nextPan = panFromOutput(instrument.output);
+  if (panner?.pan?.setValueAtTime) panner.pan.setValueAtTime(nextPan, safeTime);
+  else if (panner?.pan?.value != null) panner.pan.value = nextPan;
+
+  const lenSec = lengthSecondsFromInstrument(envSourceIns);
+
+  let noteStartSafe = safeTime;
+  let delayTicks = 0;
+  if (cmd === "D") {
+    delayTicks = clamp(valByte == null ? 0 : valByte | 0, 0, TICKS_PER_STEP);
+    if (delayTicks >= TICKS_PER_STEP) return;
+    noteStartSafe = phraseTickBoundarySec(safeTime, stepDurSec, delayTicks);
   }
 
-  if (cmd === "W" && (channel === 0 || channel === 1)) {
-    const w = widthFromByte(valByte);
-    if (polyWorklet && workletReady) setPolyDutyAtTime(channel, w, safeTime);
-    else applyPulseWidthAtTime(channel === 0 ? synthPulse1 : synthPulse2, w, safeTime);
-  }
+  scheduleInstrumentEnvelopeAtTime(
+    channel,
+    envSourceIns,
+    noteStartSafe,
+    lenSec === Infinity ? Infinity : lenSec,
+    waveGainMul,
+  );
 
-  if (cmd === "T") {
-    const raw = valByte == null ? state.bpm : clamp(valByte | 0, 0, 255);
-    const bpm = clamp(raw, BPM_RANGE_MIN, BPM_RANGE_MAX);
-    if (Tone.Transport?.bpm?.setValueAtTime) Tone.Transport.bpm.setValueAtTime(bpm, time);
-    else if (Tone.Transport?.bpm?.value != null) Tone.Transport.bpm.value = bpm;
-    return;
-  }
-
-  // Volume envelope (ENV1/2/3) on the channel gain.
-  const lenSec = lengthSecondsFromInstrument(instrument);
-  scheduleInstrumentEnvelopeAtTime(channel, instrument, safeTime, lenSec === Infinity ? Infinity : lenSec);
-  // Estimate when the gate has decayed close to silence again.
-  // For infinite-length notes we treat the gate as "never silent" so overlapping notes become legato (no phase reset).
-  // For finite length, add a small tail so the close target settles.
   try {
     const chGate = clamp(channel | 0, 0, 3);
     if (!Number.isFinite(lenSec) || lenSec === Infinity) gateSilentAfterByChannel[chGate] = Infinity;
-    else gateSilentAfterByChannel[chGate] = safeTime + Math.max(0, lenSec) + 0.03;
+    else gateSilentAfterByChannel[chGate] = noteStartSafe + Math.max(0, lenSec) + 0.03;
   } catch { /* ignore */ }
 
-  // D: retrigger within the step. When note is empty and D is used on noise channel,
-  // still produce a roll.
-  if (cmd === "D") {
-    const count = retriggerCount(valByte);
-    if (count <= 0) return;
-    const sub = stepDurSec / count;
-    for (let i = 0; i < count; i++) {
-      const t = time + i * sub;
-      const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
-      // Simulate retrigger by pulsing the channel gain (sources are always running).
+  if (cmd === "R") {
+    const lo = valByte == null ? 0 : valByte & 0x0f;
+    const period = lo | 0;
+    if (period > 0) {
+      const volNib = (valByte >> 4) & 0x0f;
+      for (let k = period; k < TICKS_PER_STEP; k += period) {
+        retrigPulseAtTime(channel, phraseTickBoundarySec(safeTime, stepDurSec, k), volNib);
+      }
+    }
+  }
+
+  const isNoise = channel === 3;
+
+  if (isNoise) {
+    if (lenSec === Infinity) heldNoteByChannel[3] = true;
+    else heldNoteByChannel[3] = false;
+
+    if (cmd === "S") {
+      const curRate = synthNoise?.playbackRate?.value ?? 1;
+      const signed = signedInt8FromByte(valByte);
+      const target = clamp(curRate * Math.pow(2, signed / 48), 0.25, 4);
+      const t0 = phraseTickBoundarySec(safeTime, stepDurSec, 0) + POLY_LOOKAHEAD_SEC;
+      const t1 = phraseTickBoundarySec(safeTime, stepDurSec, TICKS_PER_STEP - 1) + POLY_LOOKAHEAD_SEC;
       try {
-        if (g?.gain?.setValueAtTime) {
-          g.gain.setValueAtTime(0, t);
-          g.gain.linearRampToValueAtTime(1, t + Math.min(0.002, dur));
-          g.gain.setValueAtTime(0, t + dur);
+        if (synthNoise?.playbackRate?.setValueAtTime) {
+          synthNoise.playbackRate.cancelScheduledValues(t0);
+          synthNoise.playbackRate.setValueAtTime(curRate, t0);
+          synthNoise.playbackRate.linearRampToValueAtTime(target, t1);
         }
       } catch { /* ignore */ }
+    }
+
+    if (hasNote) {
+      const baseNoteStr = transposeSemis !== 0 ? transposeNoteBySemis(step.note, transposeSemis) : step.note;
+      let baseFreq;
+      try {
+        baseFreq = Tone.Frequency(baseNoteStr).toFrequency();
+      } catch {
+        return;
+      }
+      const neutral = 440;
+      const scheduleNoiseRate = (k, freqHz) => {
+        const t = phraseTickBoundarySec(safeTime, stepDurSec, k) + POLY_LOOKAHEAD_SEC;
+        const r = clamp(freqHz / neutral, 0.25, 4);
+        try {
+          if (synthNoise?.playbackRate?.setValueAtTime) {
+            if (k === 0) synthNoise.playbackRate.cancelScheduledValues(t);
+            synthNoise.playbackRate.setValueAtTime(r, t);
+          }
+        } catch { /* ignore */ }
+      };
+
+      if (cmd === "C") {
+        const v = valByte == null ? 0 : valByte | 0;
+        const x = (v >> 4) & 0x0f;
+        const y = v & 0x0f;
+        const offs = [0, x, y];
+        for (let k = 0; k < TICKS_PER_STEP; k++) {
+          const fq = Tone.Frequency(transposeNoteBySemis(baseNoteStr, offs[k % 3])).toFrequency();
+          scheduleNoiseRate(k, fq);
+        }
+      } else if (cmd === "L") {
+        const f1 = baseFreq;
+        const prev = lastPlayedNoteByChannel[3];
+        let f0 = f1;
+        if (prev) {
+          try { f0 = Tone.Frequency(transposeNoteBySemis(prev, transposeSemis)).toFrequency(); } catch { /* ignore */ }
+        }
+        for (let k = 0; k < TICKS_PER_STEP; k++) {
+          const a = TICKS_PER_STEP <= 1 ? 1 : k / (TICKS_PER_STEP - 1);
+          scheduleNoiseRate(k, f0 + (f1 - f0) * a);
+        }
+      } else if (cmd === "P") {
+        let f = baseFreq;
+        for (let k = 0; k < TICKS_PER_STEP; k++) {
+          scheduleNoiseRate(k, f);
+          const st = signedInt8FromByte(valByte) / 16;
+          f *= Math.pow(2, st / 12);
+        }
+      } else if (cmd === "V") {
+        const rateHz = 4 + (((valByte ?? 0) >> 4) & 0x0f) * 0.65;
+        const depth = VIBRATO_DEPTH_SEMITONES[(valByte ?? 0) & 0x0f];
+        for (let k = 0; k < TICKS_PER_STEP; k++) {
+          const tSec = (k / TICKS_PER_STEP) * stepDurSec;
+          const lfo = Math.sin(2 * Math.PI * rateHz * tSec);
+          const fq = baseFreq * Math.pow(2, (depth * lfo) / 12);
+          scheduleNoiseRate(k, fq);
+        }
+      } else if (cmd !== "S") {
+        scheduleNoiseRate(0, baseFreq);
+      }
+
+      lastPlayedNoteByChannel[3] = phraseNoteToString(baseNoteStr);
     }
     return;
   }
 
-  if (synth === synthNoise) {
-    // Noise source is always running; gating is via GainNode only.
-    if (lenSec === Infinity) heldNoteByChannel[channel] = true;
-    else heldNoteByChannel[channel] = false;
-    return;
-  }
-
-  if (!step.note) return;
-  const baseNote = transposeSemis !== 0 ? transposeNoteBySemis(step.note, transposeSemis) : step.note;
+  if (!hasNote) return;
 
   if (lenSec <= 0) return;
 
-  // 3) Pitch first: set oscillator frequency at the event time so the envelope comes up on the correct pitch.
+  const baseNoteStr = transposeSemis !== 0 ? transposeNoteBySemis(step.note, transposeSemis) : step.note;
+  let baseFreq;
   try {
-    const freq = Tone.Frequency(baseNote).toFrequency();
-    if (polyWorklet && workletReady && channel >= 0 && channel <= 2) {
-      // Single always-on polyphonic worklet.
-      // Critical: reset phase when the gate has already "ducked" close to silence, otherwise the phase reset itself clicks.
-      const polyLookAheadSec = 0.002;
-      const polyTime = safeTime + polyLookAheadSec;
-      if (channel === 0 || channel === 1) {
-        setPolyShape(channel, "pulse");
-        setPolyDutyAtTime(channel, pulseWidthForInstrumentMode(instrument.mode), polyTime);
+    baseFreq = Tone.Frequency(baseNoteStr).toFrequency();
+  } catch {
+    return;
+  }
+
+  const firstTick = delayTicks;
+  const polyTime0 = phraseTickBoundarySec(safeTime, stepDurSec, firstTick) + POLY_LOOKAHEAD_SEC;
+
+  if (polyWorklet && workletReady && channel >= 0 && channel <= 2) {
+    if (channel === 0 || channel === 1) {
+      setPolyShape(channel, "pulse");
+      const duty =
+        cmd === "W" ? widthFromByte(valByte) : pulseWidthForInstrumentMode(instrument.mode);
+      setPolyDutyAtTime(channel, duty, polyTime0);
+    } else if (channel === 2) {
+      if (cmd === "W") {
+        const mode = valByte == null ? 0 : valByte & 0x03;
+        const waveType =
+          mode === 0 ? "triangle" :
+          mode === 1 ? "sawtooth" :
+          mode === 2 ? "square" : "sine";
+        const shape = waveType === "triangle" ? "triangle" : waveType === "sawtooth" ? "saw" : waveType;
+        setPolyShape(2, shape);
       } else {
-        // WAV: shape per instrument mode
         const waveType = waveTypeForInstrumentMode(instrument.mode);
         const shape = waveType === "triangle" ? "triangle" : waveType === "sawtooth" ? "saw" : waveType === "square" ? "square" : "sine";
         setPolyShape(2, shape);
       }
-      setPolyFreqAtTime(channel, freq, polyTime);
-      // Only phase-reset when we expect the gate to be near-silent.
-      // If the previous note is still "active" (overlap/legato), resetting phase is the click source — just retune.
-      const silentAfter = gateSilentAfterByChannel[clamp(channel | 0, 0, 3)];
-      // Infinity means "gate never fully closes" (LENGTH=31 / sustain-like): treat all transitions as legato (no phase reset).
-      const willReset =
-        silentAfter === Infinity
-          ? false
-          : (Number.isFinite(silentAfter) ? polyTime >= silentAfter : true);
-      if (willReset) polyNoteOnAtTime(channel, polyTime, 96);
-      audioDebugLog({ where: "pitchSet.poly", channel, baseNote, freq, safeTime, polyTime, willReset, silentAfter });
-    } else {
-      // Legacy paths (OscillatorNode or per-note worklet)
-      // Re-create oscillator at note boundary (clean phase + deterministic params).
-      const next = replaceOscillatorForChannelAtTime(channel, instrument, freq, safeTime);
-      if (next) synth = next;
-      setOscFrequencyAtTime(synth, freq, safeTime);
-      audioDebugLog({ where: "pitchSet", channel, baseNote, freq, safeTime });
     }
-  } catch {
-    /* ignore */
+  } else if (channel === 0 || channel === 1) {
+    const duty = cmd === "W" ? widthFromByte(valByte) : pulseWidthForInstrumentMode(instrument.mode);
+    applyPulseWidthAtTime(channel === 0 ? synthPulse1 : synthPulse2, duty, phraseTickBoundarySec(safeTime, stepDurSec, firstTick));
   }
 
-  // Note: release already forced at trigger start for clean retrigger.
+  const setMelodicFreq = (k, freqHz, synthRef) => {
+    const tickT = phraseTickBoundarySec(safeTime, stepDurSec, k);
+    if (polyWorklet && workletReady && channel >= 0 && channel <= 2) {
+      setPolyFreqAtTime(channel, freqHz, tickT + POLY_LOOKAHEAD_SEC);
+    } else if (channel <= 2) {
+      if (k === 0) {
+        const next = replaceOscillatorForChannelAtTime(channel, instrument, freqHz, tickT);
+        if (next) synth = next;
+      }
+      setOscFrequencyAtTime(synthRef || synth, freqHz, tickT);
+    }
+  };
 
-  if (cmd === "A") {
-    const v = valByte == null ? 0x00 : clamp(valByte | 0, 0, 255);
+  if (polyWorklet && workletReady && channel >= 0 && channel <= 2) {
+    const silentAfter = gateSilentAfterByChannel[clamp(channel | 0, 0, 3)];
+    const willReset =
+      silentAfter === Infinity ? false : (Number.isFinite(silentAfter) ? polyTime0 >= silentAfter : true);
+    if (willReset) polyNoteOnAtTime(channel, polyTime0, 96);
+    audioDebugLog({ where: "pitchSet.poly", channel, baseNote: baseNoteStr, freq: baseFreq, safeTime, polyTime: polyTime0, willReset, silentAfter });
+  }
+
+  const applyDefaultConstantPitch = () => {
+    for (let k = 0; k < TICKS_PER_STEP; k++) setMelodicFreq(k, baseFreq, synth);
+  };
+
+  if (!cmd || cmd === "E" || cmd === "D" || cmd === "R" || cmd === "W") {
+    applyDefaultConstantPitch();
+  } else if (cmd === "C") {
+    const v = valByte == null ? 0 : valByte | 0;
     const x = (v >> 4) & 0x0f;
     const y = v & 0x0f;
-    const notes = [
-      transposeNoteBySemis(baseNote, 0),
-      transposeNoteBySemis(baseNote, x),
-      transposeNoteBySemis(baseNote, y),
-    ];
-    const sub = stepDurSec / 3;
-    for (let i = 0; i < 3; i++) {
-      const dur = lenSec === Infinity ? sub * 0.85 : Math.min(sub * 0.85, Math.max(0.01, lenSec));
-      const t = time + i * sub;
-      // Arp: schedule frequency changes; gain envelope already handles loudness.
-      try {
-        const freq = Tone.Frequency(notes[i]).toFrequency();
-        setOscFrequencyAtTime(synth, freq, t);
-      } catch { /* ignore */ }
-      // Optional: small gate pulse for separation
-      try {
-        if (g?.gain?.setValueAtTime) {
-          g.gain.setValueAtTime(0, t);
-          g.gain.linearRampToValueAtTime(1, t + Math.min(0.002, dur));
-        }
-      } catch { /* ignore */ }
+    const names = [baseNoteStr, transposeNoteBySemis(baseNoteStr, x), transposeNoteBySemis(baseNoteStr, y)];
+    for (let k = 0; k < TICKS_PER_STEP; k++) {
+      const fq = Tone.Frequency(names[k % 3]).toFrequency();
+      setMelodicFreq(k, fq, synth);
+    }
+  } else if (cmd === "L") {
+    const f1 = baseFreq;
+    const prev = lastPlayedNoteByChannel[channel];
+    let f0 = f1;
+    if (prev) {
+      try { f0 = Tone.Frequency(transposeNoteBySemis(prev, transposeSemis)).toFrequency(); } catch { /* ignore */ }
+    }
+    for (let k = 0; k < TICKS_PER_STEP; k++) {
+      const a = TICKS_PER_STEP <= 1 ? 1 : k / (TICKS_PER_STEP - 1);
+      setMelodicFreq(k, f0 + (f1 - f0) * a, synth);
+    }
+  } else if (cmd === "P") {
+    let f = baseFreq;
+    for (let k = 0; k < TICKS_PER_STEP; k++) {
+      setMelodicFreq(k, f, synth);
+      const st = signedInt8FromByte(valByte) / 16;
+      f *= Math.pow(2, st / 12);
+    }
+  } else if (cmd === "V") {
+    const rateHz = 4 + (((valByte ?? 0) >> 4) & 0x0f) * 0.65;
+    const depth = VIBRATO_DEPTH_SEMITONES[(valByte ?? 0) & 0x0f];
+    for (let k = 0; k < TICKS_PER_STEP; k++) {
+      const tSec = (k / TICKS_PER_STEP) * stepDurSec;
+      const lfo = Math.sin(2 * Math.PI * rateHz * tSec);
+      const fq = baseFreq * Math.pow(2, (depth * lfo) / 12);
+      setMelodicFreq(k, fq, synth);
+    }
+  } else if (cmd === "S") {
+    const h = ((valByte ?? 0) >> 4) & 0x0f;
+    const mag = 1 + (h / 15) * 1.75;
+    const down = ((valByte ?? 0) & 1) === 0;
+    const fEnd = baseFreq;
+    const fStart = down ? fEnd * mag : fEnd / mag;
+    for (let k = 0; k < TICKS_PER_STEP; k++) {
+      const a = TICKS_PER_STEP <= 1 ? 1 : k / (TICKS_PER_STEP - 1);
+      setMelodicFreq(k, fStart + (fEnd - fStart) * a, synth);
     }
   } else {
-    // Normal note: schedule frequency, let gain envelope/LENGTH do the gate.
-    heldNoteByChannel[channel] = lenSec === Infinity;
+    applyDefaultConstantPitch();
   }
 
-  // P: pitch slide in cents over the step duration, then reset.
-  if (cmd === "P" && semis !== 0) {
-    const detuneCents = semis * 100;
-    if (synth?.detune?.value != null) {
-      synth.detune.setValueAtTime(0, safeTime);
-      synth.detune.linearRampToValueAtTime(detuneCents, safeTime + stepDurSec * 0.9);
-      synth.detune.setValueAtTime(0, safeTime + stepDurSec);
-    }
-  }
+  lastPlayedNoteByChannel[channel] = phraseNoteToString(baseNoteStr);
+  heldNoteByChannel[channel] = lenSec === Infinity;
 }
 
 function getOutputLatencySeconds() {
