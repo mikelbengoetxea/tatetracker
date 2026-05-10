@@ -1955,6 +1955,10 @@ function drillDown() {
 }
 
 function drillUp() {
+  if (activeScreen === "I") {
+    setActiveScreen("P");
+    return true;
+  }
   if (activeScreen === "P") {
     setActiveScreen("C");
     return true;
@@ -1973,6 +1977,7 @@ function renderNavMap() {
   const onC = activeScreen === "C";
   const onP = activeScreen === "P";
   const onI = activeScreen === "I";
+  const onT = activeScreen === "T";
 
   const rangeBlock = rangeSelectionBlocksDrill();
   const cid = onS ? getSelectedChainIdFromSong() : null;
@@ -1980,6 +1985,11 @@ function renderNavMap() {
 
   const chainCellOk = onS && cid != null && !rangeBlock;
   const phraseCellOk = onC && pid != null && !rangeBlock;
+
+  /** Open Chain: strict slot on Song, or any deeper screen (drill-up / context). */
+  const chainNavOk = chainCellOk || onC || onP || onI || onT;
+  /** Open Phrase: strict PHR on Chain, or Instrument/Table (context), or already on Phrase. */
+  const phraseNavOk = phraseCellOk || onP || onI || onT;
 
   const instrDrillOk = phraseCursorOnFilledInstColumn();
 
@@ -1991,14 +2001,14 @@ function renderNavMap() {
     btn.disabled = false;
 
     if (scr === "C") {
-      const dead = !(chainCellOk || onC);
+      const dead = !chainNavOk;
       if (dead) {
         btn.classList.add("btn--disabled");
         btn.setAttribute("aria-disabled", "true");
         btn.disabled = true;
       }
     } else if (scr === "P") {
-      const dead = !(phraseCellOk || onP);
+      const dead = !phraseNavOk;
       if (dead) {
         btn.classList.add("btn--disabled");
         btn.setAttribute("aria-disabled", "true");
@@ -2048,6 +2058,11 @@ function handleNavClick(targetScreen) {
       setActiveScreen("C");
       return;
     }
+    if (activeScreen === "P" || activeScreen === "I" || activeScreen === "T") {
+      if (!state.chains[activeChainId]) state.chains[activeChainId] = Array.from({ length: ROWS }, () => emptyChainRow());
+      setActiveScreen("C");
+      return;
+    }
     return;
   }
   if (targetScreen === "P") {
@@ -2062,6 +2077,13 @@ function handleNavClick(targetScreen) {
         return;
       }
       activePhraseId = pid;
+      if (!state.phrases[activePhraseId]) {
+        state.phrases[activePhraseId] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: null, cmd: null, val: null })) };
+      }
+      setActiveScreen("P");
+      return;
+    }
+    if (activeScreen === "I" || activeScreen === "T") {
       if (!state.phrases[activePhraseId]) {
         state.phrases[activePhraseId] = { steps: Array.from({ length: ROWS }, () => ({ note: "", instr: null, cmd: null, val: null })) };
       }
