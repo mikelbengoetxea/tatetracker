@@ -370,8 +370,6 @@ const CMD_SET = new Set(["V", "P", "O", "D", "A", "W", "T", "K"]);
 const CMD_ORDER = [null, "V", "P", "O", "D", "A", "W", "T", "K"];
 /** Non-null command cycle: `--` sits between `K` (wrap down) and `V` (wrap up). */
 const PHRASE_CMD_CYCLE = ["V", "P", "O", "D", "A", "W", "T", "K"];
-/** First note when nudging up from an empty (`--`) note cell (natural C, octave 3 — not C#). */
-const PHRASE_NOTE_EMPTY_UP = "C3";
 const PHRASE_NOTE_NUM_MIN = 0;
 const PHRASE_NOTE_NUM_MAX = 8 * 12 + 11; // B8
 
@@ -1581,18 +1579,6 @@ function assignActiveInstrumentOnNewNote(step, prevNoteStr) {
   }
 }
 
-/** Nudge bar: first step from `--` — up → C3, down → B8; jump adds ±12 semitones from that anchor. */
-function phraseNudgeNoteFromEmpty(step, sign, isJump, prevNoteStr) {
-  const baseN =
-    sign > 0
-      ? noteNumberFromParts(parseNote(PHRASE_NOTE_EMPTY_UP) ?? { idx: 0, octave: 3 })
-      : PHRASE_NOTE_NUM_MAX;
-  const delta = sign * (isJump ? 12 : 0);
-  const nextN = clamp(baseN + delta, PHRASE_NOTE_NUM_MIN, PHRASE_NOTE_NUM_MAX);
-  step.note = makeNote(partsFromNoteNumber(nextN));
-  assignActiveInstrumentOnNewNote(step, prevNoteStr);
-}
-
 function displayValForStep(step) {
   const cmd = normalizeCmd(step?.cmd);
   if (!cmd) return "--";
@@ -2304,16 +2290,19 @@ function applyCmdDeltaToStep(step, deltaSign) {
   const cycle = PHRASE_CMD_CYCLE;
   const d = deltaSign > 0 ? 1 : -1;
   let next = null;
-  if (prev == null) {
-    next = d > 0 ? cycle[0] : cycle[cycle.length - 1];
-  } else {
-    let i = cycle.indexOf(prev);
-    if (i < 0) i = 0;
-    if (d > 0) {
-      next = i === cycle.length - 1 ? null : cycle[i + 1];
-    } else {
-      next = i === 0 ? null : cycle[i - 1];
+  if (d > 0) {
+    if (prev == null) next = cycle[0];
+    else {
+      const i = cycle.indexOf(prev);
+      const ii = i < 0 ? 0 : i;
+      next = ii >= cycle.length - 1 ? null : cycle[ii + 1];
     }
+  } else if (prev == null) {
+    next = cycle[cycle.length - 1];
+  } else {
+    const i = cycle.indexOf(prev);
+    const ii = i < 0 ? 0 : i;
+    next = ii <= 0 ? cycle[cycle.length - 1] : cycle[ii - 1];
   }
   step.cmd = next;
   ensureValSemantics(step);
@@ -2337,14 +2326,84 @@ function nudgeActionFromKeyboardDelta(delta) {
 }
 
 /**
- * Smart nudge from `--` on a 00..FF slot: + → `00`, − → `FF`; jump adds `step` after that anchor.
+ * LSDj-style wrap on [minV, maxV]: + at max → min, − at min → max. `step` is magnitude (1 or jump size).
  */
-function nudgeByteFromEmpty(sign, step) {
-  const st = step | 0;
-  if (sign > 0 && st === 1) return 0x00;
-  if (sign < 0 && st === 1) return 0xff;
-  const base = sign > 0 ? 0x00 : 0xff;
-  return clampByte(base + sign * st);
+function nudgeWrapInt(cur, sign, minV, maxV, step) {
+  const st = Math.max(1, Math.abs(step | 0));
+  const span = maxV - minV + 1;
+  const x = clamp(Number(cur) || 0, minV, maxV);
+  const k = x - minV + (sign > 0 ? st : -st);
+  return minV + (((k % span) + span) % span);
+}
+
+/**
+ * One step for nullable 0..maxV: ... → max → `--` → 0 → … ; `−` from `--` or `0` → max (skips `--` going down from 0).
+ */
+function nudgeNullableByteOnce(cur, dir, maxV) {
+  const max = maxV | 0;
+  if (dir > 0) {
+    if (cur == null) return 0;
+    const v = clamp(cur | 0, 0, max);
+    if (v >= max) return null;
+    return v + 1;
+  }
+  if (cur == null) return max;
+  const v = clamp(cur | 0, 0, max);
+  if (v <= 0) return max;
+  return v - 1;
+}
+
+function nudgeNullableByteSteps(cur, sign, maxV, step) {
+  const st = Math.max(1, Math.abs(step | 0));
+  const dir = sign > 0 ? 1 : -1;
+  let v = cur;
+  for (let i = 0; i < st; i++) v = nudgeNullableByteOnce(v, dir, maxV);
+  return v;
+}
+
+/** Normalize legacy “empty” chain/song bytes to null for nudge math. */
+function normalizeEmptyChainSongByte(v) {
+  if (v == null || v === 0xff) return null;
+  return v | 0;
+}
+
+/**
+ * One semitone step for phrase notes: B8+ → `--`, `--`+ → lowest note; `--`− → B8; C0− → B8.
+ */
+function phraseNoteNudgeOnce(noteStr, dir) {
+  const empty = !normalizeNote(noteStr);
+  if (dir > 0) {
+    if (empty) return makeNote(partsFromNoteNumber(PHRASE_NOTE_NUM_MIN));
+    const parsed = parseNote(noteStr);
+    if (!parsed) return makeNote(partsFromNoteNumber(PHRASE_NOTE_NUM_MIN));
+    const n = noteNumberFromParts(parsed);
+    if (n >= PHRASE_NOTE_NUM_MAX) return "";
+    return makeNote(partsFromNoteNumber(n + 1));
+  }
+  if (empty) return makeNote(partsFromNoteNumber(PHRASE_NOTE_NUM_MAX));
+  const parsed = parseNote(noteStr);
+  if (!parsed) return makeNote(partsFromNoteNumber(PHRASE_NOTE_NUM_MAX));
+  const n = noteNumberFromParts(parsed);
+  if (n <= PHRASE_NOTE_NUM_MIN) return makeNote(partsFromNoteNumber(PHRASE_NOTE_NUM_MAX));
+  return makeNote(partsFromNoteNumber(n - 1));
+}
+
+function phraseNoteNudgeSteps(noteStr, sign, step) {
+  const st = Math.max(1, Math.abs(step | 0));
+  const dir = sign > 0 ? 1 : -1;
+  let s = noteStr;
+  for (let i = 0; i < st; i++) s = phraseNoteNudgeOnce(s, dir);
+  return s;
+}
+
+/** Chain TSP transpose semitones: wrap −12..12. */
+function nudgeWrapSemis(cur, delta) {
+  const minV = -12;
+  const maxV = 12;
+  const span = maxV - minV + 1;
+  const x = clamp(cur | 0, minV, maxV);
+  const k = x - minV + delta;
+  return minV + (((k % span) + span) % span);
 }
 
 /** Song / chain id slots: unset or classic “empty” byte. */
@@ -2478,39 +2537,37 @@ function applyNudgeToInstrumentParam(paramRow, action, isRandom) {
   const pr = clamp(paramRow | 0, 0, INSTRUMENT_PARAM_ROWS - 1);
   const sign = nudgeBarSign(action);
   const isJump = action.startsWith("jump");
-  const step = isJump ? 16 : 1;
-  const cur = readInstrumentParamValue(pr);
+  ensureInstrumentsInState(state);
+  const ins = state.instruments[instrumentTargetIndex];
   if (pr === 0) {
     if (isRandom) instrumentTargetIndex = randomInt(0, NUM_INSTRUMENTS - 1);
-    else instrumentTargetIndex = clamp((cur || 0) + sign * step, 0, NUM_INSTRUMENTS - 1);
+    else instrumentTargetIndex = nudgeWrapInt(instrumentTargetIndex, sign, 0, NUM_INSTRUMENTS - 1, isJump ? 16 : 1);
     applyLiveInstrumentUpdateForId(instrumentTargetIndex);
     return;
   }
-  ensureInstrumentsInState(state);
-  const ins = state.instruments[instrumentTargetIndex];
   if (pr === 1) {
     if (isRandom) ins.type = randomInt(0, 2);
-    else ins.type = clamp(ins.type + sign * (isJump ? 2 : 1), 0, 2);
+    else ins.type = nudgeWrapInt(ins.type, sign, 0, 2, isJump ? 2 : 1);
   } else if (pr === 2) {
     if (isRandom) ins.mode = randomInt(0, 3);
-    else ins.mode = clamp(ins.mode + sign * (isJump ? 2 : 1), 0, 3);
+    else ins.mode = nudgeWrapInt(ins.mode, sign, 0, 3, isJump ? 2 : 1);
   } else if (pr === 6) {
     if (isRandom) ins.length = randomInt(0, 31);
-    else ins.length = clamp(ins.length + sign * (isJump ? 8 : 1), 0, 31);
+    else ins.length = nudgeWrapInt(ins.length, sign, 0, 31, isJump ? 8 : 1);
   } else if (pr === 7) {
     if (isRandom) ins.output = randomInt(0, 2);
-    else ins.output = clamp(ins.output + sign * (isJump ? 2 : 1), 0, 2);
+    else ins.output = nudgeWrapInt(ins.output, sign, 0, 2, isJump ? 2 : 1);
   } else if (pr === 8) {
     if (isRandom) ins.tablePreset = randomInt(0, 11);
-    else ins.tablePreset = clamp(ins.tablePreset + sign * (isJump ? 4 : 1), 0, 11);
+    else ins.tablePreset = nudgeWrapInt(ins.tablePreset, sign, 0, 11, isJump ? 4 : 1);
   } else {
     if (isRandom) {
       if (pr === 3) ins.env1 = randomInt(0, 0x0f);
       else if (pr === 4) ins.env2 = randomInt(0, 0x01);
       else ins.env3 = randomInt(0, 0x0f);
-    } else if (pr === 3) ins.env1 = clamp((ins.env1 | 0) + sign * 1, 0, 0x0f);
-    else if (pr === 4) ins.env2 = clamp((ins.env2 | 0) + sign * 1, 0, 0x01);
-    else ins.env3 = clamp((ins.env3 | 0) + sign * 1, 0, 0x0f);
+    } else if (pr === 3) ins.env1 = nudgeWrapInt(ins.env1 | 0, sign, 0, 0x0f, isJump ? 4 : 1);
+    else if (pr === 4) ins.env2 = nudgeWrapInt(ins.env2 | 0, sign, 0, 0x01, 1);
+    else ins.env3 = nudgeWrapInt(ins.env3 | 0, sign, 0, 0x0f, isJump ? 4 : 1);
   }
   ins.name = instrumentDefaultName(instrumentTargetIndex);
   applyLiveInstrumentUpdateForId(instrumentTargetIndex);
@@ -2551,13 +2608,13 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
     const rr = clamp(row, 0, ROWS - 1);
     const cc = clamp(col, 0, SONG_COLS.length - 1);
     const songRow = state.song?.[rr];
-    const cur = Array.isArray(songRow) ? songRow[cc] : (cc === 0 ? songRow : null);
+    const curRaw = Array.isArray(songRow) ? songRow[cc] : (cc === 0 ? songRow : null);
+    const cur = normalizeEmptyChainSongByte(curRaw);
     const sign = nudgeBarSign(action);
     const step = !isRandom && action.startsWith("jump") ? 16 : 1;
     let next;
     if (isRandom) next = randomInt(0, 255);
-    else if (cur == null) next = nudgeByteFromEmpty(sign, step);
-    else next = clampByte(clampByte(cur) + sign * step);
+    else next = nudgeNullableByteSteps(cur, sign, 255, step);
     if (Array.isArray(songRow)) songRow[cc] = next;
     else if (cc === 0) state.song[rr] = next;
     return;
@@ -2574,18 +2631,17 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
     const delta = isRandom ? 0 : sign * step;
 
     if (cc === 0) {
-      const cur = entry.phraseId;
+      const cur = normalizeEmptyChainSongByte(entry.phraseId);
       let next;
       if (isRandom) next = randomInt(0, 255);
-      else if (cur == null) next = nudgeByteFromEmpty(sign, step);
-      else next = clampByte(clampByte(cur) + delta);
+      else next = nudgeNullableByteSteps(cur, sign, 255, step);
       entry.phraseId = next;
       state.chains[activeChainId][rr] = entry;
       return;
     }
 
     const startSemis = semisFromTspByte(entry.tsp);
-    const nextSemis = isRandom ? randomInt(-12, 12) : clamp(startSemis + delta, -12, 12);
+    const nextSemis = isRandom ? randomInt(-12, 12) : nudgeWrapSemis(startSemis, delta);
     entry.tsp = tspByteFromSemis(nextSemis);
     state.chains[activeChainId][rr] = entry;
     return;
@@ -2610,28 +2666,8 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
         assignActiveInstrumentOnNewNote(step, prevNote);
         return;
       }
-      if (!normalizeNote(step.note)) {
-        phraseNudgeNoteFromEmpty(step, sign, isJump, prevNote);
-        return;
-      }
-      const stepSz = sign * (isJump ? 12 : 1);
-      const parsed = parseNote(step.note);
-      if (!parsed) return;
-      const startN = noteNumberFromParts(parsed);
-      if (stepSz > 0 && startN >= PHRASE_NOTE_NUM_MAX) {
-        step.note = "";
-        return;
-      }
-      if (stepSz < 0 && startN <= PHRASE_NOTE_NUM_MIN) {
-        step.note = "";
-        return;
-      }
-      const nextN = startN + stepSz;
-      if (nextN > PHRASE_NOTE_NUM_MAX || nextN < PHRASE_NOTE_NUM_MIN) {
-        step.note = "";
-        return;
-      }
-      step.note = makeNote(partsFromNoteNumber(nextN));
+      const st = isJump ? 12 : 1;
+      step.note = phraseNoteNudgeSteps(step.note, sign, st);
       assignActiveInstrumentOnNewNote(step, prevNote);
       return;
     }
@@ -2641,27 +2677,8 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
         step.instr = randomInt(0, 31);
         return;
       }
-      if (step.instr == null) {
-        if (!isJump) {
-          step.instr = sign > 0 ? 0 : 0x1f;
-        } else {
-          step.instr = clamp((sign > 0 ? 0 : 0x1f) + sign * 16, 0, 31);
-        }
-        return;
-      }
-      const start = clamp(step.instr | 0, 0, 31);
-      const delta = sign * (isJump ? 16 : 1);
-      if (sign > 0 && start >= 0x1f) {
-        step.instr = null;
-        return;
-      }
-      if (sign < 0 && start <= 0) {
-        step.instr = null;
-        return;
-      }
-      const raw = start + delta;
-      if (raw < 0 || raw > 31) step.instr = null;
-      else step.instr = raw;
+      const st = isJump ? 16 : 1;
+      step.instr = nudgeNullableByteSteps(step.instr, sign, 31, st);
       return;
     }
 
@@ -2671,17 +2688,20 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
         ensureValSemantics(step);
         return;
       }
-      applyCmdDeltaToStep(step, sign > 0 ? 1 : -1);
+      const reps = isJump ? 16 : 1;
+      const ds = sign > 0 ? 1 : -1;
+      for (let i = 0; i < reps; i++) applyCmdDeltaToStep(step, ds);
       return;
     }
 
     if (colKey === "val") {
       const stepSz = isJump ? 16 : 1;
-      const cur = step.val;
       let next;
       if (isRandom) next = randomInt(0, 255);
-      else if (cur == null) next = nudgeByteFromEmpty(sign, stepSz);
-      else next = clampByte(clampByte(cur) + sign * stepSz);
+      else if (normalizeCmd(step.cmd)) {
+        const cur = step.val == null ? 0 : clampByte(step.val);
+        next = nudgeWrapInt(cur, sign, 0, 255, stepSz);
+      } else next = nudgeNullableByteSteps(step.val, sign, 255, stepSz);
       step.val = next;
       ensureValSemantics(step);
     }
@@ -2808,7 +2828,7 @@ function applyChainHexDelta(delta) {
   }
   const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
   const curSemis = semisFromTspByte(entry.tsp);
-  const nextSemis = clamp(curSemis + delta, -12, 12);
+  const nextSemis = nudgeWrapSemis(curSemis, delta);
   entry.tsp = tspByteFromSemis(nextSemis);
   state.chains[activeChainId][chainSelRow] = entry;
   saveState();
