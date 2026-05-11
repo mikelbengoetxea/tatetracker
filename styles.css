@@ -8,6 +8,8 @@
   --grid: #18212d;
   --sel: #1a2b3d;
   --play: #143326;
+  --tsp-pos: #4ade80;
+  --tsp-neg: #f472b6;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   --sans: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
   --header-h: 50px;
@@ -544,6 +546,24 @@ html {
   outline-offset: -2px;
   position: relative;
   z-index: 1;
+}
+.list16__cell--tsp {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+}
+.list16__cell--tsp-pos {
+  color: var(--tsp-pos);
+}
+.list16__cell--tsp-neg {
+  color: var(--tsp-neg);
+}
+.list16__cell--selected.list16__cell--tsp-pos {
+  color: #86efac;
+}
+.list16__cell--selected.list16__cell--tsp-neg {
+  color: #f9a8d4;
 }
 .list16__row--playhead {
   /* Hollow/overlay row highlight (cursor stays visible) */

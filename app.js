@@ -380,9 +380,10 @@ const PHRASE_NOTE_NUM_MIN = 0;
 const PHRASE_NOTE_NUM_MAX = 8 * 12 + 11; // B8
 /** First note set when nudging from an empty cell (UI `---`); matches common “C3” anchor. */
 const NOTE_NUDGE_INITIAL = "C3";
-/** Chain transpose semitones: ±0x30 (±48, four octaves). Byte `00` displays as `--`. */
-const TSP_SEMIS_MAX = 0x30;
-const TSP_SEMIS_MIN = -0x30;
+/** Chain transpose semitones: ±30. Byte `00` displays as `--`. Jump (Z+⏫/⏬) = ±12. */
+const TSP_SEMIS_MAX = 30;
+const TSP_SEMIS_MIN = -30;
+const TSP_JUMP_SEMIS = 12;
 
 function normalizeCmd(value) {
   if (value == null) return null;
@@ -1795,7 +1796,10 @@ function renderChainView({ force = false } = {}) {
     if (cellInSelectedRange("C", r, 0)) cP.classList.add("list16__cell--range-highlight");
 
     const cT = document.createElement("div");
-    cT.className = "list16__cell editcell";
+    cT.className = "list16__cell editcell list16__cell--tsp";
+    const tspSemis = semisFromTspByte(entry.tsp);
+    if (tspSemis > 0) cT.classList.add("list16__cell--tsp-pos");
+    else if (tspSemis < 0) cT.classList.add("list16__cell--tsp-neg");
     cT.textContent = formatTsp(entry.tsp);
     cT.dataset.screen = "C";
     cT.dataset.row = String(r);
@@ -2417,38 +2421,31 @@ function phraseNoteNudgeSteps(noteStr, sign, step) {
 }
 
 /**
- * Transpose nudge with `--` (0 semis) as a stop: … +2F → +30 → -- → -30 → -2F …
- * (see `formatTsp`: 0 displays as `--`).
+ * Transpose nudge: `[+01…+30] <-> -- <-> [-01…-30]`.
+ * Up from `--` → +01; down from `--` → -01; up at +30 → `--`; down at -30 → `--`.
  */
 function transposeTspInc(s) {
   const x = clamp((Number(s) || 0) | 0, TSP_SEMIS_MIN, TSP_SEMIS_MAX);
-  if (x === 0) return TSP_SEMIS_MIN;
+  if (x === 0) return 1;
   if (x === TSP_SEMIS_MAX) return 0;
-  if (x > 0 && x < TSP_SEMIS_MAX) return x + 1;
-  if (x === -1) return 1;
-  if (x === TSP_SEMIS_MIN) return TSP_SEMIS_MIN + 1;
-  if (x < 0 && x > TSP_SEMIS_MIN) return x + 1;
-  return x;
+  if (x > 0) return x + 1;
+  if (x === -1) return 0;
+  return x + 1;
 }
 
 function transposeTspDec(s) {
   const x = clamp((Number(s) || 0) | 0, TSP_SEMIS_MIN, TSP_SEMIS_MAX);
-  if (x === 0) return TSP_SEMIS_MAX;
-  if (x === 1) return -1;
-  if (x > 0 && x <= TSP_SEMIS_MAX) return x - 1;
+  if (x === 0) return -1;
   if (x === TSP_SEMIS_MIN) return 0;
-  if (x < 0 && x > TSP_SEMIS_MIN) return x - 1;
-  return x;
+  if (x < 0) return x - 1;
+  if (x === 1) return 0;
+  return x - 1;
 }
 
-function nudgeTransposeSteps(semis0, sign, step) {
-  const st = Math.max(1, Math.abs(step | 0));
-  let s = clamp((Number(semis0) || 0) | 0, TSP_SEMIS_MIN, TSP_SEMIS_MAX);
-  const dir = sign > 0 ? 1 : -1;
-  for (let i = 0; i < st; i++) {
-    s = dir > 0 ? transposeTspInc(s) : transposeTspDec(s);
-  }
-  return s;
+function transposeTspApplyJump(semis0, sign) {
+  const s0 = clamp((Number(semis0) || 0) | 0, TSP_SEMIS_MIN, TSP_SEMIS_MAX);
+  const d = sign > 0 ? TSP_JUMP_SEMIS : -TSP_JUMP_SEMIS;
+  return clamp(s0 + d, TSP_SEMIS_MIN, TSP_SEMIS_MAX);
 }
 
 /** Song / chain id slots: unset or classic “empty” byte. */
@@ -2685,9 +2682,14 @@ function applyNudgeToCell(screen, row, col, action, isRandom) {
     }
 
     const startSemis = semisFromTspByte(entry.tsp);
-    const nextSemis = isRandom
-      ? randomInt(TSP_SEMIS_MIN, TSP_SEMIS_MAX)
-      : nudgeTransposeSteps(startSemis, sign, step);
+    let nextSemis;
+    if (isRandom) {
+      nextSemis = randomInt(TSP_SEMIS_MIN, TSP_SEMIS_MAX);
+    } else if (action === "jump_inc" || action === "jump_dec") {
+      nextSemis = transposeTspApplyJump(startSemis, action === "jump_inc" ? 1 : -1);
+    } else {
+      nextSemis = sign > 0 ? transposeTspInc(startSemis) : transposeTspDec(startSemis);
+    }
     entry.tsp = tspByteFromSemis(nextSemis);
     state.chains[activeChainId][rr] = entry;
     return;
@@ -2874,9 +2876,10 @@ function applyChainHexDelta(delta) {
   }
   const entry = normalizeChainRow(state.chains[activeChainId][chainSelRow]);
   const curSemis = semisFromTspByte(entry.tsp);
-  const step = Math.abs(delta) | 0;
+  const ad = Math.abs(delta) | 0;
   const sign = delta > 0 ? 1 : -1;
-  const nextSemis = nudgeTransposeSteps(curSemis, sign, step || 1);
+  const nextSemis =
+    ad >= 16 ? transposeTspApplyJump(curSemis, sign) : sign > 0 ? transposeTspInc(curSemis) : transposeTspDec(curSemis);
   entry.tsp = tspByteFromSemis(nextSemis);
   state.chains[activeChainId][chainSelRow] = entry;
   saveState();
