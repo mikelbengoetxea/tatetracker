@@ -3998,7 +3998,9 @@ function triggerStep(step, time, stepDurSec, opts = {}) {
   }
 
   let synth = channelSynth(channel);
-  if (!synth && channel !== 3) return;
+  // Poly worklet drives PU1/PU2/WAV; per-channel OscillatorNodes stay null in that mode.
+  const usesPolyMelodic = polyWorklet && workletReady && channel >= 0 && channel <= 2;
+  if (!synth && channel !== 3 && !usesPolyMelodic) return;
 
   const panner =
     channel === 0 ? panPulse1 :
